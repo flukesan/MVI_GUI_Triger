@@ -1,0 +1,14 @@
+{
+  "mqtt": {
+    "broker": "localhost",
+    "port": 1883,
+    "username": "",
+    "password": "",
+    "qos": 1
+  },
+  "topics": [
+    "mvi/model1/trigger",
+    "mvi/model2/trigger"
+  ],
+  "subscribe_topic": "mvi/+/result"
+}
