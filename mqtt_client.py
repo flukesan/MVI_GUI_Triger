@@ -3,8 +3,13 @@ MQTT Client for MVI Edge Inspection Trigger
 Handles MQTT connection, publishing triggers, and receiving results
 """
 import paho.mqtt.client as mqtt
-from PyQt6.QtCore import QObject, pyqtSignal
 import json
+
+# Try to import PyQt6, fallback to PySide6 if not available
+try:
+    from PyQt6.QtCore import QObject, pyqtSignal
+except ImportError:
+    from PySide6.QtCore import QObject, Signal as pyqtSignal
 
 
 class MQTTClient(QObject):
