@@ -280,15 +280,28 @@ class MVITriggerGUI(QMainWindow):
         try:
             # Try to parse JSON
             data = json.loads(payload)
-            result = data.get("result", "").lower()
+
+            # Check for "Overall Result" first (MVI format), then fallback to "result"
+            result = data.get("Overall Result", data.get("result", "")).lower()
 
             if result == "pass":
                 self.show_pass()
             elif result == "fail":
                 self.show_fail()
             else:
-                # If not JSON or unknown result, display as text
-                self.status_label.setText(f"ผลลัพธ์:\n{payload}")
+                # If result not found, try case-insensitive search
+                for key in data.keys():
+                    if key.lower() in ["overall result", "result"]:
+                        result = str(data[key]).lower()
+                        if result == "pass":
+                            self.show_pass()
+                            return
+                        elif result == "fail":
+                            self.show_fail()
+                            return
+
+                # If still no result found, display as text
+                self.status_label.setText(f"ไม่พบผลลัพธ์\n{payload}")
                 self.statusBar.showMessage(f"ได้รับข้อความจาก {topic}", 3000)
 
         except json.JSONDecodeError:
