@@ -132,6 +132,29 @@ mosquitto_pub -t "mvi/model1/result" -m '{"result":"pass"}'
 
 ## Troubleshooting
 
+### PyQt6 ImportError: undefined symbol
+หากพบข้อผิดพลาด `ImportError: undefined symbol` เมื่อรันโปรแกรม:
+
+**วิธีแก้ไข:**
+```bash
+# 1. ถอนการติดตั้ง PyQt6 ทั้งหมด
+pip uninstall PyQt6 PyQt6-Qt6 PyQt6-sip -y
+
+# 2. อัพเกรด pip
+pip install --upgrade pip
+
+# 3. ติดตั้ง PyQt6 ใหม่
+pip install PyQt6>=6.7.0 PyQt6-Qt6>=6.7.0
+
+# 4. หรือติดตั้งจาก requirements.txt
+pip install -r requirements.txt --force-reinstall
+```
+
+**ถ้ายังไม่ได้ผล ลองติดตั้งแบบเฉพาะเจาะจง:**
+```bash
+pip install PyQt6==6.7.1 PyQt6-Qt6==6.7.1 --force-reinstall
+```
+
 ### ไม่สามารถเชื่อมต่อ MQTT Broker
 - ตรวจสอบว่า MQTT Broker ทำงานอยู่
 - ตรวจสอบ `broker` และ `port` ใน `config.json`
