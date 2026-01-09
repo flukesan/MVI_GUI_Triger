@@ -1,17 +1,31 @@
 """
 MVI Edge Inspection Trigger GUI
-PyQt6 GUI Application for triggering MVI inspections via MQTT
+PyQt6/PySide6 GUI Application for triggering MVI inspections via MQTT
 """
 import sys
 import json
 from pathlib import Path
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-    QMessageBox, QGroupBox, QGridLayout, QStatusBar
-)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont, QPalette, QColor
+
+# Try to import PyQt6, fallback to PySide6 if not available
+try:
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar
+    )
+    from PyQt6.QtCore import Qt, QTimer
+    from PyQt6.QtGui import QFont, QPalette, QColor
+    print("Using PyQt6")
+except ImportError:
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar
+    )
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtGui import QFont, QPalette, QColor
+    print("Using PySide6")
+
 from mqtt_client import MQTTClient
 
 
