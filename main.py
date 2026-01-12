@@ -393,15 +393,22 @@ class MVITriggerGUI(QMainWindow):
             "Inspection name": "ชื่อการตรวจสอบ",
             "Input source name": "ชื่อแหล่งข้อมูล",
             "Input source type": "ประเภทแหล่งข้อมูล",
-            "Trigger type": "ประเภทการทริกเกอร์"
+            "Trigger type": "ประเภทการทริกเกอร์",
+            "DatasetID": "Dataset ID",
+            "ImageID": "Image ID"
         }
 
         # Build metadata display text
         metadata_text = ""
         metadata_found = False
 
+        # Check for nested mvidata structure first
+        mvidata = data.get("mvidata", {})
+
         for eng_key, thai_label in metadata_fields.items():
-            value = data.get(eng_key, "")
+            # Try to get value from main data first, then from nested mvidata
+            value = data.get(eng_key, mvidata.get(eng_key, ""))
+
             if value:
                 metadata_found = True
                 # Format the value (truncate if too long)
