@@ -4,6 +4,7 @@ PyQt6/PySide6 GUI Application for triggering MVI inspections via MQTT
 """
 import sys
 import json
+import os
 from pathlib import Path
 
 # Try to import PyQt6, fallback to PySide6 if not available
@@ -11,19 +12,19 @@ try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QMessageBox, QGroupBox, QGridLayout, QStatusBar
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea
     )
-    from PyQt6.QtCore import Qt, QTimer
-    from PyQt6.QtGui import QFont, QPalette, QColor
+    from PyQt6.QtCore import Qt, QTimer, QSize
+    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap
     print("Using PyQt6")
 except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QMessageBox, QGroupBox, QGridLayout, QStatusBar
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea
     )
-    from PySide6.QtCore import Qt, QTimer
-    from PySide6.QtGui import QFont, QPalette, QColor
+    from PySide6.QtCore import Qt, QTimer, QSize
+    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap
     print("Using PySide6")
 
 from mqtt_client import MQTTClient
@@ -188,6 +189,38 @@ class MVITriggerGUI(QMainWindow):
         metadata_group.setLayout(metadata_layout)
         main_layout.addWidget(metadata_group)
 
+        # ========== Image Display ==========
+        image_group = QGroupBox("ภาพที่ตรวจสอบ")
+        image_layout = QVBoxLayout()
+
+        # Image ID label
+        self.image_id_label = QLabel("Image ID: -")
+        self.image_id_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.image_id_label.setStyleSheet("QLabel { color: #495057; padding: 5px; }")
+        image_layout.addWidget(self.image_id_label)
+
+        # Scroll area for image
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(300)
+        scroll_area.setStyleSheet(
+            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }"
+        )
+
+        # Image label
+        self.image_label = QLabel("ยังไม่มีภาพ")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet(
+            "QLabel { background-color: #e9ecef; color: #6c757d; "
+            "padding: 40px; font-size: 14px; }"
+        )
+        self.image_label.setMinimumSize(400, 300)
+        scroll_area.setWidget(self.image_label)
+
+        image_layout.addWidget(scroll_area)
+        image_group.setLayout(image_layout)
+        main_layout.addWidget(image_group)
+
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
@@ -312,6 +345,9 @@ class MVITriggerGUI(QMainWindow):
             # Extract and display metadata
             self.display_metadata(data)
 
+            # Extract and display image
+            self.display_image(data)
+
             if result == "pass":
                 self.show_pass()
             elif result == "fail":
@@ -344,13 +380,20 @@ class MVITriggerGUI(QMainWindow):
             QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
             return
 
-        # Reset status and metadata
+        # Reset status, metadata, and image
         self.status_label.setText("กำลังตรวจสอบ...")
         self.status_label.setStyleSheet(
             "QLabel { background-color: #ffc107; color: black; "
             "border-radius: 10px; padding: 20px; }"
         )
         self.metadata_label.setText("<i>กำลังรอผลลัพธ์...</i>")
+        self.image_id_label.setText("Image ID: -")
+        self.image_label.clear()
+        self.image_label.setText("กำลังรอภาพ...")
+        self.image_label.setStyleSheet(
+            "QLabel { background-color: #e9ecef; color: #6c757d; "
+            "padding: 40px; font-size: 14px; }"
+        )
 
         # Prepare trigger message
         trigger_msg = {
@@ -477,6 +520,55 @@ class MVITriggerGUI(QMainWindow):
 
         # Update metadata label with HTML formatting
         self.metadata_label.setText(metadata_text)
+
+    def display_image(self, data):
+        """Display image from MVI inspection result"""
+        # Try to get Image ID
+        image_id = data.get("Image ID", "")
+
+        # Try to get Image Path
+        image_path = data.get("Image Path", "")
+
+        # Update Image ID label
+        if image_id:
+            self.image_id_label.setText(f"Image ID: {image_id}")
+        else:
+            self.image_id_label.setText("Image ID: -")
+
+        # Try to load and display image
+        if image_path and os.path.exists(image_path):
+            try:
+                pixmap = QPixmap(image_path)
+
+                if not pixmap.isNull():
+                    # Scale image to fit while maintaining aspect ratio
+                    scaled_pixmap = pixmap.scaled(
+                        800, 600,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+
+                    self.image_label.setPixmap(scaled_pixmap)
+                    self.image_label.setStyleSheet("QLabel { background-color: #e9ecef; }")
+                    self.image_label.setMinimumSize(scaled_pixmap.width(), scaled_pixmap.height())
+                    print(f"✓ โหลดภาพสำเร็จ: {image_path}")
+                else:
+                    self.image_label.setText(f"ไม่สามารถโหลดภาพได้\n{image_path}")
+                    print(f"⚠️ ไม่สามารถโหลดภาพ: {image_path}")
+
+            except Exception as e:
+                self.image_label.setText(f"เกิดข้อผิดพลาดในการโหลดภาพ\n{str(e)}")
+                print(f"❌ Error loading image: {e}")
+
+        elif image_path:
+            # Path provided but file doesn't exist
+            self.image_label.setText(f"ไม่พบไฟล์ภาพ\n{image_path}")
+            print(f"⚠️ ไม่พบไฟล์ภาพ: {image_path}")
+
+        else:
+            # No image path provided
+            self.image_label.setText("ยังไม่มีภาพ")
+            print("ℹ️ ไม่มี Image Path ในข้อมูล MQTT")
 
     def closeEvent(self, event):
         """Handle window close event"""
