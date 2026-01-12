@@ -170,6 +170,24 @@ class MVITriggerGUI(QMainWindow):
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
 
+        # ========== Metadata Display ==========
+        metadata_group = QGroupBox("ข้อมูลการตรวจสอบ")
+        metadata_layout = QVBoxLayout()
+
+        self.metadata_label = QLabel("ยังไม่มีข้อมูล")
+        self.metadata_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.metadata_label.setWordWrap(True)
+        self.metadata_label.setFont(QFont("Arial", 11))
+        self.metadata_label.setStyleSheet(
+            "QLabel { background-color: #f8f9fa; color: #212529; "
+            "border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; }"
+        )
+        self.metadata_label.setMinimumHeight(150)
+
+        metadata_layout.addWidget(self.metadata_label)
+        metadata_group.setLayout(metadata_layout)
+        main_layout.addWidget(metadata_group)
+
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
@@ -284,6 +302,9 @@ class MVITriggerGUI(QMainWindow):
             # Check for "Overall Result" first (MVI format), then fallback to "result"
             result = data.get("Overall Result", data.get("result", "")).lower()
 
+            # Extract and display metadata
+            self.display_metadata(data)
+
             if result == "pass":
                 self.show_pass()
             elif result == "fail":
@@ -316,12 +337,13 @@ class MVITriggerGUI(QMainWindow):
             QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
             return
 
-        # Reset status
+        # Reset status and metadata
         self.status_label.setText("กำลังตรวจสอบ...")
         self.status_label.setStyleSheet(
             "QLabel { background-color: #ffc107; color: black; "
             "border-radius: 10px; padding: 20px; }"
         )
+        self.metadata_label.setText("<i>กำลังรอผลลัพธ์...</i>")
 
         # Prepare trigger message
         trigger_msg = {
@@ -358,6 +380,42 @@ class MVITriggerGUI(QMainWindow):
             "border-radius: 10px; padding: 20px; }"
         )
         self.statusBar.showMessage("ผลการตรวจสอบ: FAIL", 5000)
+
+    def display_metadata(self, data):
+        """Display metadata from MVI inspection result"""
+        # Define metadata fields to display (in Thai)
+        metadata_fields = {
+            "Rule": "กฎการตรวจสอบ",
+            "Original file name": "ชื่อไฟล์ต้นฉบับ",
+            "Capture date": "วันที่บันทึก",
+            "Capture time": "เวลาที่บันทึก",
+            "Station name": "ชื่อสถานี",
+            "Inspection name": "ชื่อการตรวจสอบ",
+            "Input source name": "ชื่อแหล่งข้อมูล",
+            "Input source type": "ประเภทแหล่งข้อมูล",
+            "Trigger type": "ประเภทการทริกเกอร์"
+        }
+
+        # Build metadata display text
+        metadata_text = ""
+        metadata_found = False
+
+        for eng_key, thai_label in metadata_fields.items():
+            value = data.get(eng_key, "")
+            if value:
+                metadata_found = True
+                # Format the value (truncate if too long)
+                value_str = str(value)
+                if len(value_str) > 60:
+                    value_str = value_str[:57] + "..."
+                metadata_text += f"<b>{thai_label}:</b> {value_str}<br>"
+
+        # If no metadata found, show default message
+        if not metadata_found:
+            metadata_text = "<i>ยังไม่มีข้อมูล</i>"
+
+        # Update metadata label with HTML formatting
+        self.metadata_label.setText(metadata_text)
 
     def closeEvent(self, event):
         """Handle window close event"""
