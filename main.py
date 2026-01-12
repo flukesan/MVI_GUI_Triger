@@ -95,7 +95,7 @@ class MVITriggerGUI(QMainWindow):
     def init_ui(self):
         """Initialize user interface"""
         self.setWindowTitle("MVI Edge Inspection Trigger")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(1100, 750)
 
         # Central widget
         central_widget = QWidget()
@@ -171,7 +171,10 @@ class MVITriggerGUI(QMainWindow):
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
 
-        # ========== Metadata Display ==========
+        # ========== Info & Image Display (Side by Side) ==========
+        info_image_layout = QHBoxLayout()
+
+        # Left: Metadata Display
         metadata_group = QGroupBox("ข้อมูลการตรวจสอบ")
         metadata_layout = QVBoxLayout()
 
@@ -183,13 +186,14 @@ class MVITriggerGUI(QMainWindow):
             "QLabel { background-color: #f8f9fa; color: #212529; "
             "border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; }"
         )
-        self.metadata_label.setMinimumHeight(150)
+        self.metadata_label.setMinimumHeight(400)
+        self.metadata_label.setMaximumWidth(400)
 
         metadata_layout.addWidget(self.metadata_label)
         metadata_group.setLayout(metadata_layout)
-        main_layout.addWidget(metadata_group)
+        info_image_layout.addWidget(metadata_group)
 
-        # ========== Image Display ==========
+        # Right: Image Display
         image_group = QGroupBox("ภาพที่ตรวจสอบ")
         image_layout = QVBoxLayout()
 
@@ -199,27 +203,22 @@ class MVITriggerGUI(QMainWindow):
         self.image_id_label.setStyleSheet("QLabel { color: #495057; padding: 5px; }")
         image_layout.addWidget(self.image_id_label)
 
-        # Scroll area for image
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setMinimumHeight(300)
-        scroll_area.setStyleSheet(
-            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }"
-        )
-
-        # Image label
+        # Image label (without scroll area)
         self.image_label = QLabel("ยังไม่มีภาพ")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet(
             "QLabel { background-color: #e9ecef; color: #6c757d; "
-            "padding: 40px; font-size: 14px; }"
+            "border: 1px solid #dee2e6; border-radius: 5px; "
+            "padding: 20px; font-size: 14px; }"
         )
-        self.image_label.setMinimumSize(400, 300)
-        scroll_area.setWidget(self.image_label)
+        self.image_label.setMinimumSize(500, 400)
+        self.image_label.setScaledContents(False)
 
-        image_layout.addWidget(scroll_area)
+        image_layout.addWidget(self.image_label)
         image_group.setLayout(image_layout)
-        main_layout.addWidget(image_group)
+        info_image_layout.addWidget(image_group, 1)  # Give more space to image
+
+        main_layout.addLayout(info_image_layout)
 
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
@@ -541,33 +540,49 @@ class MVITriggerGUI(QMainWindow):
                 pixmap = QPixmap(image_path)
 
                 if not pixmap.isNull():
-                    # Scale image to fit while maintaining aspect ratio
+                    # Scale image to fit within label size (480x380) while maintaining aspect ratio
                     scaled_pixmap = pixmap.scaled(
-                        800, 600,
+                        480, 380,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation
                     )
 
                     self.image_label.setPixmap(scaled_pixmap)
-                    self.image_label.setStyleSheet("QLabel { background-color: #e9ecef; }")
-                    self.image_label.setMinimumSize(scaled_pixmap.width(), scaled_pixmap.height())
-                    print(f"✓ โหลดภาพสำเร็จ: {image_path}")
+                    self.image_label.setStyleSheet(
+                        "QLabel { background-color: #e9ecef; "
+                        "border: 1px solid #dee2e6; border-radius: 5px; }"
+                    )
+                    print(f"✓ โหลดภาพสำเร็จ: {image_path} (ขนาด: {scaled_pixmap.width()}x{scaled_pixmap.height()})")
                 else:
+                    self.image_label.clear()
                     self.image_label.setText(f"ไม่สามารถโหลดภาพได้\n{image_path}")
                     print(f"⚠️ ไม่สามารถโหลดภาพ: {image_path}")
 
             except Exception as e:
+                self.image_label.clear()
                 self.image_label.setText(f"เกิดข้อผิดพลาดในการโหลดภาพ\n{str(e)}")
                 print(f"❌ Error loading image: {e}")
 
         elif image_path:
             # Path provided but file doesn't exist
+            self.image_label.clear()
             self.image_label.setText(f"ไม่พบไฟล์ภาพ\n{image_path}")
+            self.image_label.setStyleSheet(
+                "QLabel { background-color: #e9ecef; color: #6c757d; "
+                "border: 1px solid #dee2e6; border-radius: 5px; "
+                "padding: 20px; font-size: 14px; }"
+            )
             print(f"⚠️ ไม่พบไฟล์ภาพ: {image_path}")
 
         else:
             # No image path provided
+            self.image_label.clear()
             self.image_label.setText("ยังไม่มีภาพ")
+            self.image_label.setStyleSheet(
+                "QLabel { background-color: #e9ecef; color: #6c757d; "
+                "border: 1px solid #dee2e6; border-radius: 5px; "
+                "padding: 20px; font-size: 14px; }"
+            )
             print("ℹ️ ไม่มี Image Path ในข้อมูล MQTT")
 
     def closeEvent(self, event):
