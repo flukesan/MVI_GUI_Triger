@@ -299,6 +299,13 @@ class MVITriggerGUI(QMainWindow):
             # Try to parse JSON
             data = json.loads(payload)
 
+            # Debug: Print received JSON to console
+            print("\n" + "="*60)
+            print(f"📨 MQTT Message received from topic: {topic}")
+            print("="*60)
+            print(json.dumps(data, indent=2, ensure_ascii=False))
+            print("="*60 + "\n")
+
             # Check for "Overall Result" first (MVI format), then fallback to "result"
             result = data.get("Overall Result", data.get("result", "")).lower()
 
@@ -384,30 +391,50 @@ class MVITriggerGUI(QMainWindow):
     def display_metadata(self, data):
         """Display metadata from MVI inspection result"""
         # Define metadata fields to display (in Thai)
+        # Each field can have multiple possible keys (case-insensitive)
         metadata_fields = {
-            "Rule": "กฎการตรวจสอบ",
-            "Original file name": "ชื่อไฟล์ต้นฉบับ",
-            "Capture date": "วันที่บันทึก",
-            "Capture time": "เวลาที่บันทึก",
-            "Station name": "ชื่อสถานี",
-            "Inspection name": "ชื่อการตรวจสอบ",
-            "Input source name": "ชื่อแหล่งข้อมูล",
-            "Input source type": "ประเภทแหล่งข้อมูล",
-            "Trigger type": "ประเภทการทริกเกอร์",
-            "DatasetID": "Dataset ID",
-            "ImageID": "Image ID"
+            "กฎการตรวจสอบ": ["Rule", "rule", "RuleName", "rule_name"],
+            "ชื่อไฟล์ต้นฉบับ": ["Original file name", "original_file_name", "filename", "FileName"],
+            "วันที่บันทึก": ["Capture date", "capture_date", "Date sent", "date"],
+            "เวลาที่บันทึก": ["Capture time", "capture_time", "Time sent", "time"],
+            "ชื่อสถานี": ["Station name", "station_name", "StationName", "station"],
+            "ชื่อการตรวจสอบ": ["Inspection name", "inspection_name", "InspectionName", "inspection"],
+            "ชื่อแหล่งข้อมูล": ["Input source name", "input_source_name", "InputSourceName"],
+            "ประเภทแหล่งข้อมูล": ["Input source type", "input_source_type", "InputSourceType"],
+            "ประเภทการทริกเกอร์": ["Trigger type", "trigger_type", "TriggerType"],
+            "Dataset ID": ["DatasetID", "dataset_id", "datasetId"],
+            "Image ID": ["ImageID", "image_id", "imageId"]
         }
 
         # Build metadata display text
         metadata_text = ""
         metadata_found = False
 
-        # Check for nested mvidata structure first
-        mvidata = data.get("mvidata", {})
+        # Collect all possible nested structures
+        nested_objects = [
+            data,  # Main level
+            data.get("mvidata", {}),  # MVI Server metadata
+            data.get("Alert", {}),  # Alert structure
+            data.get("Inherited metadata", {}),  # Inherited metadata
+            data.get("metadata", {}),  # Generic metadata
+        ]
 
-        for eng_key, thai_label in metadata_fields.items():
-            # Try to get value from main data first, then from nested mvidata
-            value = data.get(eng_key, mvidata.get(eng_key, ""))
+        # Search for each field in all nested structures
+        for thai_label, possible_keys in metadata_fields.items():
+            value = None
+
+            # Try each possible key in each nested object
+            for nested_obj in nested_objects:
+                if not isinstance(nested_obj, dict):
+                    continue
+
+                for key in possible_keys:
+                    if key in nested_obj and nested_obj[key]:
+                        value = nested_obj[key]
+                        break
+
+                if value:
+                    break
 
             if value:
                 metadata_found = True
@@ -420,6 +447,7 @@ class MVITriggerGUI(QMainWindow):
         # If no metadata found, show default message
         if not metadata_found:
             metadata_text = "<i>ยังไม่มีข้อมูล</i>"
+            print("⚠️ ไม่พบ metadata ที่ตรงกัน - ตรวจสอบ console log ด้านบน")
 
         # Update metadata label with HTML formatting
         self.metadata_label.setText(metadata_text)
