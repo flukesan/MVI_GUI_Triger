@@ -197,13 +197,53 @@ class MVITriggerGUI(QMainWindow):
         image_group = QGroupBox("ภาพที่ตรวจสอบ")
         image_layout = QVBoxLayout()
 
+        # Top row: Image ID and Controls
+        top_row = QHBoxLayout()
+
         # Image ID label
         self.image_id_label = QLabel("Image ID: -")
         self.image_id_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         self.image_id_label.setStyleSheet("QLabel { color: #495057; padding: 5px; }")
-        image_layout.addWidget(self.image_id_label)
+        top_row.addWidget(self.image_id_label)
 
-        # Image label (without scroll area)
+        top_row.addStretch()
+
+        # Zoom controls
+        self.zoom_out_btn = QPushButton("🔍-")
+        self.zoom_out_btn.setMaximumWidth(50)
+        self.zoom_out_btn.setToolTip("Zoom Out")
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        top_row.addWidget(self.zoom_out_btn)
+
+        self.zoom_reset_btn = QPushButton("100%")
+        self.zoom_reset_btn.setMaximumWidth(60)
+        self.zoom_reset_btn.setToolTip("Reset Zoom")
+        self.zoom_reset_btn.clicked.connect(self.zoom_reset)
+        top_row.addWidget(self.zoom_reset_btn)
+
+        self.zoom_in_btn = QPushButton("🔍+")
+        self.zoom_in_btn.setMaximumWidth(50)
+        self.zoom_in_btn.setToolTip("Zoom In")
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        top_row.addWidget(self.zoom_in_btn)
+
+        self.fullscreen_btn = QPushButton("⛶")
+        self.fullscreen_btn.setMaximumWidth(50)
+        self.fullscreen_btn.setToolTip("Full Screen")
+        self.fullscreen_btn.clicked.connect(self.show_fullscreen)
+        top_row.addWidget(self.fullscreen_btn)
+
+        image_layout.addLayout(top_row)
+
+        # Scroll area for image (to support zoom)
+        self.image_scroll = QScrollArea()
+        self.image_scroll.setWidgetResizable(True)
+        self.image_scroll.setMinimumHeight(400)
+        self.image_scroll.setStyleSheet(
+            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }"
+        )
+
+        # Image label
         self.image_label = QLabel("ยังไม่มีภาพ")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet(
@@ -214,11 +254,16 @@ class MVITriggerGUI(QMainWindow):
         self.image_label.setMinimumSize(500, 400)
         self.image_label.setScaledContents(False)
 
-        image_layout.addWidget(self.image_label)
+        self.image_scroll.setWidget(self.image_label)
+        image_layout.addWidget(self.image_scroll)
         image_group.setLayout(image_layout)
         info_image_layout.addWidget(image_group, 1)  # Give more space to image
 
         main_layout.addLayout(info_image_layout)
+
+        # Initialize zoom and image variables
+        self.current_pixmap = None  # Original pixmap with bounding boxes
+        self.zoom_level = 1.0
 
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
@@ -548,19 +593,15 @@ class MVITriggerGUI(QMainWindow):
                         pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
                         print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
 
-                    # Scale image to fit within label size (480x380) while maintaining aspect ratio
-                    scaled_pixmap = pixmap.scaled(
-                        480, 380,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
+                    # Store original pixmap and reset zoom
+                    self.current_pixmap = pixmap
+                    self.zoom_level = 1.0
+                    self.zoom_reset_btn.setText("100%")
 
-                    self.image_label.setPixmap(scaled_pixmap)
-                    self.image_label.setStyleSheet(
-                        "QLabel { background-color: #e9ecef; "
-                        "border: 1px solid #dee2e6; border-radius: 5px; }"
-                    )
-                    print(f"✓ โหลดภาพสำเร็จ: {image_path} (ขนาด: {scaled_pixmap.width()}x{scaled_pixmap.height()})")
+                    # Apply current zoom level
+                    self.apply_zoom()
+
+                    print(f"✓ โหลดภาพสำเร็จ: {image_path} (ขนาดต้นฉบับ: {pixmap.width()}x{pixmap.height()})")
                 else:
                     self.image_label.clear()
                     self.image_label.setText(f"ไม่สามารถโหลดภาพได้\n{image_path}")
@@ -666,11 +707,196 @@ class MVITriggerGUI(QMainWindow):
 
         return result_pixmap
 
+    def apply_zoom(self):
+        """Apply current zoom level to image"""
+        if self.current_pixmap and not self.current_pixmap.isNull():
+            # Calculate new size based on zoom level
+            new_width = int(self.current_pixmap.width() * self.zoom_level)
+            new_height = int(self.current_pixmap.height() * self.zoom_level)
+
+            # Scale pixmap
+            scaled_pixmap = self.current_pixmap.scaled(
+                new_width, new_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            self.image_label.setPixmap(scaled_pixmap)
+            self.image_label.setStyleSheet(
+                "QLabel { background-color: #e9ecef; "
+                "border: 1px solid #dee2e6; border-radius: 5px; }"
+            )
+            self.image_label.resize(scaled_pixmap.size())
+
+            # Update zoom button text
+            self.zoom_reset_btn.setText(f"{int(self.zoom_level * 100)}%")
+
+    def zoom_in(self):
+        """Zoom in on image"""
+        if self.current_pixmap:
+            self.zoom_level = min(self.zoom_level + 0.25, 5.0)  # Max 500%
+            self.apply_zoom()
+            print(f"🔍 Zoom In: {int(self.zoom_level * 100)}%")
+
+    def zoom_out(self):
+        """Zoom out on image"""
+        if self.current_pixmap:
+            self.zoom_level = max(self.zoom_level - 0.25, 0.25)  # Min 25%
+            self.apply_zoom()
+            print(f"🔍 Zoom Out: {int(self.zoom_level * 100)}%")
+
+    def zoom_reset(self):
+        """Reset zoom to 100%"""
+        if self.current_pixmap:
+            self.zoom_level = 1.0
+            self.apply_zoom()
+            print(f"🔍 Zoom Reset: 100%")
+
+    def show_fullscreen(self):
+        """Show image in fullscreen mode"""
+        if self.current_pixmap and not self.current_pixmap.isNull():
+            fullscreen_dialog = FullscreenImageDialog(self.current_pixmap, self.image_id_label.text(), self)
+            fullscreen_dialog.exec()
+
     def closeEvent(self, event):
         """Handle window close event"""
         if self.mqtt_client:
             self.mqtt_client.disconnect()
         event.accept()
+
+
+class FullscreenImageDialog(QDialog):
+    """Fullscreen dialog for displaying image"""
+
+    def __init__(self, pixmap, image_id, parent=None):
+        super().__init__(parent)
+        self.pixmap = pixmap
+        self.zoom_level = 1.0
+
+        self.setWindowTitle("Full Screen View")
+        self.setModal(True)
+
+        # Set to fullscreen
+        self.showMaximized()
+
+        # Layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Top toolbar
+        toolbar = QHBoxLayout()
+
+        # Image ID
+        id_label = QLabel(image_id)
+        id_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        id_label.setStyleSheet("QLabel { color: #495057; }")
+        toolbar.addWidget(id_label)
+
+        toolbar.addStretch()
+
+        # Zoom controls
+        zoom_out_btn = QPushButton("🔍-")
+        zoom_out_btn.setMaximumWidth(50)
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        toolbar.addWidget(zoom_out_btn)
+
+        self.zoom_label = QPushButton("100%")
+        self.zoom_label.setMaximumWidth(60)
+        self.zoom_label.clicked.connect(self.zoom_reset)
+        toolbar.addWidget(self.zoom_label)
+
+        zoom_in_btn = QPushButton("🔍+")
+        zoom_in_btn.setMaximumWidth(50)
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        toolbar.addWidget(zoom_in_btn)
+
+        # Close button
+        close_btn = QPushButton("✕ Close")
+        close_btn.setMaximumWidth(80)
+        close_btn.clicked.connect(self.close)
+        toolbar.addWidget(close_btn)
+
+        layout.addLayout(toolbar)
+
+        # Scroll area for image
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet(
+            "QScrollArea { background-color: #2b2b2b; border: none; }"
+        )
+
+        # Image label
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet("QLabel { background-color: #2b2b2b; }")
+        self.image_label.setScaledContents(False)
+
+        scroll_area.setWidget(self.image_label)
+        layout.addWidget(scroll_area)
+
+        # Display image
+        self.apply_zoom()
+
+        # Set dark style
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+            }
+            QPushButton {
+                background-color: #444;
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 5px 10px;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+        """)
+
+    def apply_zoom(self):
+        """Apply zoom to fullscreen image"""
+        if self.pixmap and not self.pixmap.isNull():
+            new_width = int(self.pixmap.width() * self.zoom_level)
+            new_height = int(self.pixmap.height() * self.zoom_level)
+
+            scaled_pixmap = self.pixmap.scaled(
+                new_width, new_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+
+            self.image_label.setPixmap(scaled_pixmap)
+            self.image_label.resize(scaled_pixmap.size())
+            self.zoom_label.setText(f"{int(self.zoom_level * 100)}%")
+
+    def zoom_in(self):
+        """Zoom in"""
+        self.zoom_level = min(self.zoom_level + 0.25, 10.0)  # Max 1000% in fullscreen
+        self.apply_zoom()
+
+    def zoom_out(self):
+        """Zoom out"""
+        self.zoom_level = max(self.zoom_level - 0.25, 0.1)  # Min 10%
+        self.apply_zoom()
+
+    def zoom_reset(self):
+        """Reset zoom"""
+        self.zoom_level = 1.0
+        self.apply_zoom()
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts"""
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        elif event.key() == Qt.Key.Key_Plus or event.key() == Qt.Key.Key_Equal:
+            self.zoom_in()
+        elif event.key() == Qt.Key.Key_Minus:
+            self.zoom_out()
+        elif event.key() == Qt.Key.Key_0:
+            self.zoom_reset()
+        else:
+            super().keyPressEvent(event)
 
 
 def main():
