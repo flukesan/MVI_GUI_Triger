@@ -215,9 +215,9 @@ class MVITriggerGUI(QMainWindow):
         self.zoom_out_btn.clicked.connect(self.zoom_out)
         top_row.addWidget(self.zoom_out_btn)
 
-        self.zoom_reset_btn = QPushButton("100%")
+        self.zoom_reset_btn = QPushButton("25%")
         self.zoom_reset_btn.setMaximumWidth(60)
-        self.zoom_reset_btn.setToolTip("Reset Zoom")
+        self.zoom_reset_btn.setToolTip("Reset Zoom to 25%")
         self.zoom_reset_btn.clicked.connect(self.zoom_reset)
         top_row.addWidget(self.zoom_reset_btn)
 
@@ -263,7 +263,7 @@ class MVITriggerGUI(QMainWindow):
 
         # Initialize zoom and image variables
         self.current_pixmap = None  # Original pixmap with bounding boxes
-        self.zoom_level = 1.0
+        self.zoom_level = 0.25  # Default zoom 25%
 
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
@@ -593,10 +593,10 @@ class MVITriggerGUI(QMainWindow):
                         pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
                         print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
 
-                    # Store original pixmap and reset zoom
+                    # Store original pixmap and reset zoom to 25%
                     self.current_pixmap = pixmap
-                    self.zoom_level = 1.0
-                    self.zoom_reset_btn.setText("100%")
+                    self.zoom_level = 0.25
+                    self.zoom_reset_btn.setText("25%")
 
                     # Apply current zoom level
                     self.apply_zoom()
@@ -746,11 +746,11 @@ class MVITriggerGUI(QMainWindow):
             print(f"🔍 Zoom Out: {int(self.zoom_level * 100)}%")
 
     def zoom_reset(self):
-        """Reset zoom to 100%"""
+        """Reset zoom to 25%"""
         if self.current_pixmap:
-            self.zoom_level = 1.0
+            self.zoom_level = 0.25
             self.apply_zoom()
-            print(f"🔍 Zoom Reset: 100%")
+            print(f"🔍 Zoom Reset: 25%")
 
     def show_fullscreen(self):
         """Show image in fullscreen mode"""
@@ -772,6 +772,10 @@ class FullscreenImageDialog(QDialog):
         super().__init__(parent)
         self.pixmap = pixmap
         self.zoom_level = 1.0
+
+        # Mouse drag variables
+        self.dragging = False
+        self.last_pos = None
 
         self.setWindowTitle("Full Screen View")
         self.setModal(True)
@@ -819,20 +823,24 @@ class FullscreenImageDialog(QDialog):
         layout.addLayout(toolbar)
 
         # Scroll area for image
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet(
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(False)  # Allow manual scrolling
+        self.scroll_area.setStyleSheet(
             "QScrollArea { background-color: #2b2b2b; border: none; }"
         )
+        # Enable mouse tracking for drag functionality
+        self.scroll_area.setMouseTracking(True)
+        self.scroll_area.viewport().setMouseTracking(True)
 
         # Image label
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet("QLabel { background-color: #2b2b2b; }")
         self.image_label.setScaledContents(False)
+        self.image_label.setMouseTracking(True)
 
-        scroll_area.setWidget(self.image_label)
-        layout.addWidget(scroll_area)
+        self.scroll_area.setWidget(self.image_label)
+        layout.addWidget(self.scroll_area)
 
         # Display image
         self.apply_zoom()
@@ -897,6 +905,38 @@ class FullscreenImageDialog(QDialog):
             self.zoom_reset()
         else:
             super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        """Handle mouse press for drag start"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = True
+            self.last_pos = event.pos()
+            self.scroll_area.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for dragging"""
+        if self.dragging and self.last_pos:
+            # Calculate the delta movement
+            delta = event.pos() - self.last_pos
+            self.last_pos = event.pos()
+
+            # Get current scroll bar positions
+            h_scroll = self.scroll_area.horizontalScrollBar()
+            v_scroll = self.scroll_area.verticalScrollBar()
+
+            # Update scroll positions (negative delta because dragging moves content in opposite direction)
+            h_scroll.setValue(h_scroll.value() - delta.x())
+            v_scroll.setValue(v_scroll.value() - delta.y())
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release for drag end"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = False
+            self.scroll_area.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        super().mouseReleaseEvent(event)
 
 
 def main():
