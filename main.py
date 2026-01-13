@@ -14,8 +14,8 @@ try:
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea
     )
-    from PyQt6.QtCore import Qt, QTimer, QSize
-    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap
+    from PyQt6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
+    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
     print("Using PyQt6")
 except ImportError:
     from PySide6.QtWidgets import (
@@ -23,8 +23,8 @@ except ImportError:
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea
     )
-    from PySide6.QtCore import Qt, QTimer, QSize
-    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap
+    from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
+    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
     print("Using PySide6")
 
 from mqtt_client import MQTTClient
@@ -528,6 +528,9 @@ class MVITriggerGUI(QMainWindow):
         # Try to get Image Path
         image_path = data.get("Image Path", "")
 
+        # Try to get Detected Objects
+        detected_objects = data.get("Detected Objects", [])
+
         # Update Image ID label
         if image_id:
             self.image_id_label.setText(f"Image ID: {image_id}")
@@ -540,6 +543,11 @@ class MVITriggerGUI(QMainWindow):
                 pixmap = QPixmap(image_path)
 
                 if not pixmap.isNull():
+                    # Draw bounding boxes if detected objects exist
+                    if detected_objects and isinstance(detected_objects, list) and len(detected_objects) > 0:
+                        pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
+                        print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
+
                     # Scale image to fit within label size (480x380) while maintaining aspect ratio
                     scaled_pixmap = pixmap.scaled(
                         480, 380,
@@ -584,6 +592,79 @@ class MVITriggerGUI(QMainWindow):
                 "padding: 20px; font-size: 14px; }"
             )
             print("ℹ️ ไม่มี Image Path ในข้อมูล MQTT")
+
+    def draw_bounding_boxes(self, pixmap, detected_objects):
+        """Draw bounding boxes, labels, and scores on image"""
+        # Create a copy of pixmap to draw on
+        result_pixmap = QPixmap(pixmap)
+        painter = QPainter(result_pixmap)
+
+        try:
+            # Enable antialiasing for smoother lines
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+            for obj in detected_objects:
+                if not isinstance(obj, dict):
+                    continue
+
+                # Get bounding box coordinates
+                rectangle = obj.get("rectangle", {})
+                min_point = rectangle.get("min", {})
+                max_point = rectangle.get("max", {})
+
+                x1 = min_point.get("x", 0)
+                y1 = min_point.get("y", 0)
+                x2 = max_point.get("x", 0)
+                y2 = max_point.get("y", 0)
+
+                # Get label and score
+                label = obj.get("label", "Unknown")
+                score = obj.get("score", 0.0)
+
+                # Calculate width and height
+                width = x2 - x1
+                height = y2 - y1
+
+                if width <= 0 or height <= 0:
+                    continue
+
+                # Choose color based on score (red for low, yellow for medium, green for high)
+                if score >= 0.8:
+                    color = QColor(40, 167, 69)  # Green #28a745
+                elif score >= 0.5:
+                    color = QColor(255, 193, 7)  # Yellow #ffc107
+                else:
+                    color = QColor(220, 53, 69)  # Red #dc3545
+
+                # Draw bounding box
+                pen = QPen(color, 3)  # 3px thick line
+                painter.setPen(pen)
+                painter.drawRect(int(x1), int(y1), int(width), int(height))
+
+                # Prepare label text
+                label_text = f"{label} {score:.2f}"
+
+                # Draw label background (filled rectangle)
+                font = QFont("Arial", 12, QFont.Weight.Bold)
+                painter.setFont(font)
+                metrics = painter.fontMetrics()
+                text_width = metrics.horizontalAdvance(label_text) + 10
+                text_height = metrics.height() + 6
+
+                # Position label above box (or below if near top edge)
+                label_y = int(y1) - text_height if y1 > text_height + 5 else int(y1) + int(height) + text_height
+
+                # Draw label background
+                painter.fillRect(int(x1), label_y - text_height + 3, text_width, text_height, color)
+
+                # Draw label text
+                painter.setPen(QPen(Qt.GlobalColor.white))
+                painter.drawText(int(x1) + 5, label_y - 3, label_text)
+
+        finally:
+            painter.end()
+
+        return result_pixmap
 
     def closeEvent(self, event):
         """Handle window close event"""
