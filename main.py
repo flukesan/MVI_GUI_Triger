@@ -561,17 +561,27 @@ class MVITriggerGUI(QMainWindow):
                     value_str = value_str[:57] + "..."
                 metadata_text += f"<b>{thai_label}:</b> {value_str}<br>"
 
-        # If no standard metadata found, check for Rule Results array
-        if not metadata_found and "Rule Results" in data:
+        # Always check for Rule Results array (whether other metadata found or not)
+        if "Rule Results" in data:
             rule_results = data.get("Rule Results", [])
             if isinstance(rule_results, list) and len(rule_results) > 0:
                 metadata_found = True
-                metadata_text += "<b>กฎที่ตรวจสอบ:</b><br>"
+
+                # Add separator if there's already metadata
+                if metadata_text:
+                    metadata_text += "<br>"
+
+                metadata_text += "<b>Rules:</b><br>"
 
                 for i, rule in enumerate(rule_results, 1):
                     if isinstance(rule, dict):
                         rule_name = rule.get("Rule Name", "Unknown")
                         result_type = rule.get("Result Type", "unknown")
+
+                        # Shorten rule name if too long (remove common prefixes)
+                        display_name = rule_name.replace("Check_", "").replace("_", " ")
+                        if len(display_name) > 25:
+                            display_name = display_name[:22] + "..."
 
                         # Color code the result
                         if result_type.lower() == "pass":
@@ -584,8 +594,7 @@ class MVITriggerGUI(QMainWindow):
                             color = "#6c757d"  # Gray
                             icon = "?"
 
-                        metadata_text += f"  {i}. {rule_name} "
-                        metadata_text += f'<span style="color: {color}; font-weight: bold;">({icon} {result_type})</span><br>'
+                        metadata_text += f'  <span style="color: {color}; font-weight: bold;">{icon}</span> {display_name}<br>'
 
         # If still no metadata found, show default message
         if not metadata_found:
