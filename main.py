@@ -171,24 +171,6 @@ class MVITriggerGUI(QMainWindow):
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
 
-        # ========== Metadata Display (Full Width) ==========
-        metadata_group = QGroupBox("ข้อมูลการตรวจสอบ")
-        metadata_layout = QVBoxLayout()
-
-        self.metadata_label = QLabel("ยังไม่มีข้อมูล")
-        self.metadata_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.metadata_label.setWordWrap(True)
-        self.metadata_label.setFont(QFont("Arial", 10))
-        self.metadata_label.setStyleSheet(
-            "QLabel { background-color: #f8f9fa; color: #212529; "
-            "border: 1px solid #dee2e6; border-radius: 5px; padding: 10px; }"
-        )
-        self.metadata_label.setMinimumHeight(120)
-
-        metadata_layout.addWidget(self.metadata_label)
-        metadata_group.setLayout(metadata_layout)
-        main_layout.addWidget(metadata_group)
-
         # ========== Dual Camera Display (Side by Side) ==========
         cameras_layout = QHBoxLayout()
 
@@ -199,6 +181,7 @@ class MVITriggerGUI(QMainWindow):
         self.cam1_zoom_reset_btn = camera1_widgets["zoom_reset_btn"]
         self.cam1_image_scroll = camera1_widgets["image_scroll"]
         self.cam1_image_label = camera1_widgets["image_label"]
+        self.cam1_metadata_label = camera1_widgets["metadata_label"]
         cameras_layout.addWidget(camera1_widgets["group"])
 
         # Camera 2 (Right)
@@ -208,6 +191,7 @@ class MVITriggerGUI(QMainWindow):
         self.cam2_zoom_reset_btn = camera2_widgets["zoom_reset_btn"]
         self.cam2_image_scroll = camera2_widgets["image_scroll"]
         self.cam2_image_label = camera2_widgets["image_label"]
+        self.cam2_metadata_label = camera2_widgets["metadata_label"]
         cameras_layout.addWidget(camera2_widgets["group"])
 
         main_layout.addLayout(cameras_layout)
@@ -246,7 +230,7 @@ class MVITriggerGUI(QMainWindow):
         """)
 
     def create_camera_viewer(self, title, camera_id):
-        """Create a camera viewer widget with zoom controls"""
+        """Create a camera viewer widget with metadata panel (left) and image (right)"""
         group = QGroupBox(title)
         layout = QVBoxLayout()
 
@@ -294,7 +278,24 @@ class MVITriggerGUI(QMainWindow):
 
         layout.addLayout(top_row)
 
-        # Scroll area for image
+        # Content row: Metadata (left) + Image (right)
+        content_layout = QHBoxLayout()
+
+        # Left: Metadata panel
+        metadata_label = QLabel("ยังไม่มีข้อมูล")
+        metadata_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        metadata_label.setWordWrap(True)
+        metadata_label.setFont(QFont("Arial", 9))
+        metadata_label.setStyleSheet(
+            "QLabel { background-color: #f8f9fa; color: #212529; "
+            "border: 1px solid #dee2e6; border-radius: 5px; padding: 10px; }"
+        )
+        metadata_label.setMinimumWidth(180)
+        metadata_label.setMaximumWidth(200)
+        metadata_label.setMinimumHeight(350)
+        content_layout.addWidget(metadata_label)
+
+        # Right: Image scroll area
         image_scroll = QScrollArea()
         image_scroll.setWidgetResizable(True)
         image_scroll.setMinimumHeight(350)
@@ -314,7 +315,9 @@ class MVITriggerGUI(QMainWindow):
         image_label.setScaledContents(False)
 
         image_scroll.setWidget(image_label)
-        layout.addWidget(image_scroll)
+        content_layout.addWidget(image_scroll, 1)  # Give image more space
+
+        layout.addLayout(content_layout)
         group.setLayout(layout)
 
         return {
@@ -323,7 +326,8 @@ class MVITriggerGUI(QMainWindow):
             "image_id_label": image_id_label,
             "zoom_reset_btn": zoom_reset_btn,
             "image_scroll": image_scroll,
-            "image_label": image_label
+            "image_label": image_label,
+            "metadata_label": metadata_label
         }
 
     def update_topic_list(self):
@@ -425,10 +429,7 @@ class MVITriggerGUI(QMainWindow):
             # Check for "Overall Result" first (MVI format), then fallback to "result"
             result = data.get("Overall Result", data.get("result", "")).lower()
 
-            # Extract and display metadata
-            self.display_metadata(data)
-
-            # Extract and display image
+            # Extract and display image (metadata will be updated inside display_image)
             self.display_image(data)
 
             if result == "pass":
@@ -463,15 +464,14 @@ class MVITriggerGUI(QMainWindow):
             QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
             return
 
-        # Reset status and metadata
+        # Reset status
         self.status_label.setText("กำลังตรวจสอบ...")
         self.status_label.setStyleSheet(
             "QLabel { background-color: #ffc107; color: black; "
             "border-radius: 10px; padding: 20px; }"
         )
-        self.metadata_label.setText("<i>กำลังรอผลลัพธ์...</i>")
 
-        # Note: Don't clear camera images on trigger
+        # Note: Don't clear camera images/metadata on trigger
         # They will be updated when new MQTT messages arrive
 
         # Prepare trigger message
@@ -510,23 +510,17 @@ class MVITriggerGUI(QMainWindow):
         )
         self.statusBar.showMessage("ผลการตรวจสอบ: FAIL", 5000)
 
-    def display_metadata(self, data):
-        """Display metadata from MVI inspection result"""
+    def display_metadata(self, camera_id, data):
+        """Display metadata from MVI inspection result for specific camera"""
         # Define metadata fields to display (in Thai)
         # Each field can have multiple possible keys (case-insensitive)
         metadata_fields = {
             "Device ID": ["Device ID", "device_id", "DeviceID", "deviceId"],
-            "กฎการตรวจสอบ": ["Rule", "rule", "RuleName", "rule_name"],
-            "ชื่อไฟล์ต้นฉบับ": ["Original file name", "original_file_name", "filename", "FileName"],
-            "วันที่บันทึก": ["Capture date", "capture_date", "Date sent", "date"],
-            "เวลาที่บันทึก": ["Capture time", "capture_time", "Time sent", "time"],
-            "ชื่อสถานี": ["Station name", "station_name", "StationName", "station"],
-            "ชื่อการตรวจสอบ": ["Inspection name", "inspection_name", "InspectionName", "inspection"],
-            "ชื่อแหล่งข้อมูล": ["Input source name", "input_source_name", "InputSourceName"],
-            "ประเภทแหล่งข้อมูล": ["Input source type", "input_source_type", "InputSourceType"],
-            "ประเภทการทริกเกอร์": ["Trigger type", "trigger_type", "TriggerType"],
-            "Dataset ID": ["DatasetID", "dataset_id", "datasetId"],
-            "Image ID": ["ImageID", "image_id", "imageId"]
+            "Image ID": ["ImageID", "image_id", "imageId", "Image ID"],
+            "Station": ["Station name", "station_name", "StationName", "station", "Station"],
+            "Inspection": ["Inspection name", "inspection_name", "InspectionName", "inspection"],
+            "วันที่": ["Capture date", "capture_date", "Date sent", "date"],
+            "เวลา": ["Capture time", "capture_time", "Time sent", "time"]
         }
 
         # Build metadata display text
@@ -596,10 +590,16 @@ class MVITriggerGUI(QMainWindow):
         # If still no metadata found, show default message
         if not metadata_found:
             metadata_text = "<i>ยังไม่มีข้อมูล</i>"
-            print("⚠️ ไม่พบ metadata ที่ตรงกัน - ตรวจสอบ console log ด้านบน")
+            print(f"⚠️ {camera_id.upper()}: ไม่พบ metadata ที่ตรงกัน")
+
+        # Get the appropriate metadata label for this camera
+        if camera_id == "cam1":
+            metadata_label = self.cam1_metadata_label
+        else:  # cam2
+            metadata_label = self.cam2_metadata_label
 
         # Update metadata label with HTML formatting
-        self.metadata_label.setText(metadata_text)
+        metadata_label.setText(metadata_text)
 
     def display_image(self, data):
         """Display image from MVI inspection result with dual camera support"""
@@ -666,7 +666,10 @@ class MVITriggerGUI(QMainWindow):
         else:
             image_id_label.setText("Image: -")
 
-        # Track latest camera for metadata display
+        # Update metadata for this camera
+        self.display_metadata(camera_id, data)
+
+        # Track latest camera for overall status display
         self.latest_camera = camera_id
 
         # Try to load and display image
