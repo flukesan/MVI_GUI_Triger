@@ -443,6 +443,10 @@ class MVITriggerGUI(QMainWindow):
             QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
             return
 
+        # Change button text to "กำลังตรวจสอบ"
+        self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
+        self.trigger_btn.setEnabled(False)  # Disable during inspection
+
         # Prepare trigger message
         trigger_msg = {
             "action": "trigger",
@@ -455,6 +459,9 @@ class MVITriggerGUI(QMainWindow):
             self.statusBar.showMessage(f"ส่ง trigger ไปยัง {current_topic}", 3000)
         else:
             QMessageBox.warning(self, "Error", "ไม่สามารถส่ง trigger ได้")
+            # Reset button if failed
+            self.trigger_btn.setText("🔘 TRIGGER")
+            self.trigger_btn.setEnabled(True)
 
     def update_camera_status(self, camera_id, data):
         """Update status label for specific camera based on Overall Result"""
@@ -476,6 +483,8 @@ class MVITriggerGUI(QMainWindow):
             )
             status_label.setVisible(True)
             print(f"✓ {camera_id.upper()}: PASS")
+            # Reset trigger button
+            self.reset_trigger_button()
         elif result == "fail":
             status_label.setText("✗ FAIL")
             status_label.setStyleSheet(
@@ -484,6 +493,8 @@ class MVITriggerGUI(QMainWindow):
             )
             status_label.setVisible(True)
             print(f"✗ {camera_id.upper()}: FAIL")
+            # Reset trigger button
+            self.reset_trigger_button()
         else:
             # Try case-insensitive search
             for key in data.keys():
@@ -497,6 +508,8 @@ class MVITriggerGUI(QMainWindow):
                         )
                         status_label.setVisible(True)
                         print(f"✓ {camera_id.upper()}: PASS")
+                        # Reset trigger button
+                        self.reset_trigger_button()
                         return
                     elif result_val == "fail":
                         status_label.setText("✗ FAIL")
@@ -506,7 +519,14 @@ class MVITriggerGUI(QMainWindow):
                         )
                         status_label.setVisible(True)
                         print(f"✗ {camera_id.upper()}: FAIL")
+                        # Reset trigger button
+                        self.reset_trigger_button()
                         return
+
+    def reset_trigger_button(self):
+        """Reset trigger button to default state"""
+        self.trigger_btn.setText("🔘 TRIGGER")
+        self.trigger_btn.setEnabled(True)
 
     def display_metadata(self, camera_id, data):
         """Display metadata from MVI inspection result for specific camera"""
