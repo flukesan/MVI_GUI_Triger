@@ -116,60 +116,51 @@ class MVITriggerGUI(QMainWindow):
         connection_group.setLayout(connection_layout)
         main_layout.addWidget(connection_group)
 
-        # ========== Topic Selection ==========
+        # ========== Topic Selection + Trigger Button ==========
         topic_group = QGroupBox("เลือก Topic สำหรับ Trigger")
         topic_layout = QHBoxLayout()
 
         self.topic_combo = QComboBox()
-        self.topic_combo.setMinimumHeight(40)
+        self.topic_combo.setMinimumHeight(50)
         self.topic_combo.setFont(QFont("Arial", 12))
         self.update_topic_list()
 
         # Add/Remove topic buttons
-        self.add_topic_btn = QPushButton("➕ เพิ่ม")
-        self.add_topic_btn.setMinimumHeight(40)
+        self.add_topic_btn = QPushButton("➕")
+        self.add_topic_btn.setMinimumHeight(50)
+        self.add_topic_btn.setMaximumWidth(50)
+        self.add_topic_btn.setToolTip("เพิ่ม Topic")
         self.add_topic_btn.clicked.connect(self.add_topic)
 
-        self.remove_topic_btn = QPushButton("➖ ลบ")
-        self.remove_topic_btn.setMinimumHeight(40)
+        self.remove_topic_btn = QPushButton("➖")
+        self.remove_topic_btn.setMinimumHeight(50)
+        self.remove_topic_btn.setMaximumWidth(50)
+        self.remove_topic_btn.setToolTip("ลบ Topic")
         self.remove_topic_btn.clicked.connect(self.remove_topic)
 
-        topic_layout.addWidget(self.topic_combo, 3)
-        topic_layout.addWidget(self.add_topic_btn, 1)
-        topic_layout.addWidget(self.remove_topic_btn, 1)
-        topic_group.setLayout(topic_layout)
-        main_layout.addWidget(topic_group)
-
-        # ========== Trigger Button ==========
-        self.trigger_btn = QPushButton("🔘 TRIGGER MVI INSPECTION")
-        self.trigger_btn.setMinimumHeight(80)
-        self.trigger_btn.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        # Trigger button (on the right)
+        self.trigger_btn = QPushButton("🔘 TRIGGER")
+        self.trigger_btn.setMinimumHeight(50)
+        self.trigger_btn.setMinimumWidth(150)
+        self.trigger_btn.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         self.trigger_btn.setStyleSheet(
             "QPushButton { background-color: #007bff; color: white; "
-            "border-radius: 10px; }"
+            "border-radius: 5px; }"
             "QPushButton:hover { background-color: #0056b3; }"
             "QPushButton:pressed { background-color: #004085; }"
             "QPushButton:disabled { background-color: #6c757d; }"
+            "QPushButton:focus { border: 2px solid #80bdff; }"
         )
+        self.trigger_btn.setToolTip("กด Space bar เพื่อ Trigger")
         self.trigger_btn.clicked.connect(self.trigger_inspection)
-        main_layout.addWidget(self.trigger_btn)
+        self.trigger_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # ========== Status Display ==========
-        status_group = QGroupBox("สถานะการตรวจสอบ")
-        status_layout = QVBoxLayout()
-
-        self.status_label = QLabel("รอการตรวจสอบ")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status_label.setMinimumHeight(200)
-        self.status_label.setFont(QFont("Arial", 48, QFont.Weight.Bold))
-        self.status_label.setStyleSheet(
-            "QLabel { background-color: #6c757d; color: white; "
-            "border-radius: 10px; padding: 20px; }"
-        )
-
-        status_layout.addWidget(self.status_label)
-        status_group.setLayout(status_layout)
-        main_layout.addWidget(status_group)
+        topic_layout.addWidget(self.topic_combo, 7)
+        topic_layout.addWidget(self.add_topic_btn)
+        topic_layout.addWidget(self.remove_topic_btn)
+        topic_layout.addWidget(self.trigger_btn, 2)
+        topic_group.setLayout(topic_layout)
+        main_layout.addWidget(topic_group)
 
         # ========== Dual Camera Display (Side by Side) ==========
         cameras_layout = QHBoxLayout()
@@ -182,6 +173,7 @@ class MVITriggerGUI(QMainWindow):
         self.cam1_image_scroll = camera1_widgets["image_scroll"]
         self.cam1_image_label = camera1_widgets["image_label"]
         self.cam1_metadata_label = camera1_widgets["metadata_label"]
+        self.cam1_status_label = camera1_widgets["status_label"]
         cameras_layout.addWidget(camera1_widgets["group"])
 
         # Camera 2 (Right)
@@ -192,6 +184,7 @@ class MVITriggerGUI(QMainWindow):
         self.cam2_image_scroll = camera2_widgets["image_scroll"]
         self.cam2_image_label = camera2_widgets["image_label"]
         self.cam2_metadata_label = camera2_widgets["metadata_label"]
+        self.cam2_status_label = camera2_widgets["status_label"]
         cameras_layout.addWidget(camera2_widgets["group"])
 
         main_layout.addLayout(cameras_layout)
@@ -278,6 +271,14 @@ class MVITriggerGUI(QMainWindow):
 
         layout.addLayout(top_row)
 
+        # Status label (hidden by default, shown when data received)
+        status_label = QLabel()
+        status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        status_label.setMinimumHeight(80)
+        status_label.setFont(QFont("Arial", 32, QFont.Weight.Bold))
+        status_label.setVisible(False)  # Hidden by default
+        layout.addWidget(status_label)
+
         # Content row: Metadata (left) + Image (right)
         content_layout = QHBoxLayout()
 
@@ -327,7 +328,8 @@ class MVITriggerGUI(QMainWindow):
             "zoom_reset_btn": zoom_reset_btn,
             "image_scroll": image_scroll,
             "image_label": image_label,
-            "metadata_label": metadata_label
+            "metadata_label": metadata_label,
+            "status_label": status_label
         }
 
     def update_topic_list(self):
@@ -426,35 +428,12 @@ class MVITriggerGUI(QMainWindow):
             print(json.dumps(data, indent=2, ensure_ascii=False))
             print("="*60 + "\n")
 
-            # Check for "Overall Result" first (MVI format), then fallback to "result"
-            result = data.get("Overall Result", data.get("result", "")).lower()
-
-            # Extract and display image (metadata will be updated inside display_image)
+            # Extract and display image (metadata and status will be updated inside display_image)
             self.display_image(data)
 
-            if result == "pass":
-                self.show_pass()
-            elif result == "fail":
-                self.show_fail()
-            else:
-                # If result not found, try case-insensitive search
-                for key in data.keys():
-                    if key.lower() in ["overall result", "result"]:
-                        result = str(data[key]).lower()
-                        if result == "pass":
-                            self.show_pass()
-                            return
-                        elif result == "fail":
-                            self.show_fail()
-                            return
-
-                # If still no result found, display as text
-                self.status_label.setText(f"ไม่พบผลลัพธ์\n{payload}")
-                self.statusBar.showMessage(f"ได้รับข้อความจาก {topic}", 3000)
-
         except json.JSONDecodeError:
-            # Not JSON, display as text
-            self.status_label.setText(f"{payload}")
+            # Not JSON, just log it
+            print(f"⚠️ Non-JSON message: {payload}")
             self.statusBar.showMessage(f"ได้รับข้อความจาก {topic}", 3000)
 
     def trigger_inspection(self):
@@ -463,16 +442,6 @@ class MVITriggerGUI(QMainWindow):
         if not current_topic:
             QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
             return
-
-        # Reset status
-        self.status_label.setText("กำลังตรวจสอบ...")
-        self.status_label.setStyleSheet(
-            "QLabel { background-color: #ffc107; color: black; "
-            "border-radius: 10px; padding: 20px; }"
-        )
-
-        # Note: Don't clear camera images/metadata on trigger
-        # They will be updated when new MQTT messages arrive
 
         # Prepare trigger message
         trigger_msg = {
@@ -486,29 +455,58 @@ class MVITriggerGUI(QMainWindow):
             self.statusBar.showMessage(f"ส่ง trigger ไปยัง {current_topic}", 3000)
         else:
             QMessageBox.warning(self, "Error", "ไม่สามารถส่ง trigger ได้")
-            self.status_label.setText("รอการตรวจสอบ")
-            self.status_label.setStyleSheet(
-                "QLabel { background-color: #6c757d; color: white; "
-                "border-radius: 10px; padding: 20px; }"
+
+    def update_camera_status(self, camera_id, data):
+        """Update status label for specific camera based on Overall Result"""
+        # Get Overall Result
+        result = data.get("Overall Result", data.get("result", "")).lower()
+
+        # Get the appropriate status label
+        if camera_id == "cam1":
+            status_label = self.cam1_status_label
+        else:  # cam2
+            status_label = self.cam2_status_label
+
+        # Update status based on result
+        if result == "pass":
+            status_label.setText("✓ PASS")
+            status_label.setStyleSheet(
+                "QLabel { background-color: #28a745; color: white; "
+                "border-radius: 8px; padding: 15px; }"
             )
-
-    def show_pass(self):
-        """Show PASS status"""
-        self.status_label.setText("✓ PASS")
-        self.status_label.setStyleSheet(
-            "QLabel { background-color: #28a745; color: white; "
-            "border-radius: 10px; padding: 20px; }"
-        )
-        self.statusBar.showMessage("ผลการตรวจสอบ: PASS", 5000)
-
-    def show_fail(self):
-        """Show FAIL status"""
-        self.status_label.setText("✗ FAIL")
-        self.status_label.setStyleSheet(
-            "QLabel { background-color: #dc3545; color: white; "
-            "border-radius: 10px; padding: 20px; }"
-        )
-        self.statusBar.showMessage("ผลการตรวจสอบ: FAIL", 5000)
+            status_label.setVisible(True)
+            print(f"✓ {camera_id.upper()}: PASS")
+        elif result == "fail":
+            status_label.setText("✗ FAIL")
+            status_label.setStyleSheet(
+                "QLabel { background-color: #dc3545; color: white; "
+                "border-radius: 8px; padding: 15px; }"
+            )
+            status_label.setVisible(True)
+            print(f"✗ {camera_id.upper()}: FAIL")
+        else:
+            # Try case-insensitive search
+            for key in data.keys():
+                if key.lower() in ["overall result", "result"]:
+                    result_val = str(data[key]).lower()
+                    if result_val == "pass":
+                        status_label.setText("✓ PASS")
+                        status_label.setStyleSheet(
+                            "QLabel { background-color: #28a745; color: white; "
+                            "border-radius: 8px; padding: 15px; }"
+                        )
+                        status_label.setVisible(True)
+                        print(f"✓ {camera_id.upper()}: PASS")
+                        return
+                    elif result_val == "fail":
+                        status_label.setText("✗ FAIL")
+                        status_label.setStyleSheet(
+                            "QLabel { background-color: #dc3545; color: white; "
+                            "border-radius: 8px; padding: 15px; }"
+                        )
+                        status_label.setVisible(True)
+                        print(f"✗ {camera_id.upper()}: FAIL")
+                        return
 
     def display_metadata(self, camera_id, data):
         """Display metadata from MVI inspection result for specific camera"""
@@ -678,7 +676,10 @@ class MVITriggerGUI(QMainWindow):
         # Update metadata for this camera
         self.display_metadata(camera_id, data)
 
-        # Track latest camera for overall status display
+        # Update status for this camera
+        self.update_camera_status(camera_id, data)
+
+        # Track latest camera
         self.latest_camera = camera_id
 
         # Try to load and display image
@@ -899,6 +900,14 @@ class MVITriggerGUI(QMainWindow):
         if pixmap and not pixmap.isNull():
             fullscreen_dialog = FullscreenImageDialog(pixmap, f"{device_id} | {image_id}", self)
             fullscreen_dialog.exec()
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts"""
+        # Space bar triggers inspection when trigger button has focus
+        if event.key() == Qt.Key.Key_Space and self.trigger_btn.hasFocus():
+            self.trigger_inspection()
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         """Handle window close event"""
