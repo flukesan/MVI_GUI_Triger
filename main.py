@@ -171,99 +171,57 @@ class MVITriggerGUI(QMainWindow):
         status_group.setLayout(status_layout)
         main_layout.addWidget(status_group)
 
-        # ========== Info & Image Display (Side by Side) ==========
-        info_image_layout = QHBoxLayout()
-
-        # Left: Metadata Display
+        # ========== Metadata Display (Full Width) ==========
         metadata_group = QGroupBox("ข้อมูลการตรวจสอบ")
         metadata_layout = QVBoxLayout()
 
         self.metadata_label = QLabel("ยังไม่มีข้อมูล")
         self.metadata_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.metadata_label.setWordWrap(True)
-        self.metadata_label.setFont(QFont("Arial", 11))
+        self.metadata_label.setFont(QFont("Arial", 10))
         self.metadata_label.setStyleSheet(
             "QLabel { background-color: #f8f9fa; color: #212529; "
-            "border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; }"
+            "border: 1px solid #dee2e6; border-radius: 5px; padding: 10px; }"
         )
-        self.metadata_label.setMinimumHeight(400)
-        self.metadata_label.setMaximumWidth(400)
+        self.metadata_label.setMinimumHeight(120)
 
         metadata_layout.addWidget(self.metadata_label)
         metadata_group.setLayout(metadata_layout)
-        info_image_layout.addWidget(metadata_group)
+        main_layout.addWidget(metadata_group)
 
-        # Right: Image Display
-        image_group = QGroupBox("ภาพที่ตรวจสอบ")
-        image_layout = QVBoxLayout()
+        # ========== Dual Camera Display (Side by Side) ==========
+        cameras_layout = QHBoxLayout()
 
-        # Top row: Image ID and Controls
-        top_row = QHBoxLayout()
+        # Camera 1 (Left)
+        camera1_widgets = self.create_camera_viewer("Camera 1", "cam1")
+        self.cam1_image_id_label = camera1_widgets["image_id_label"]
+        self.cam1_device_label = camera1_widgets["device_label"]
+        self.cam1_zoom_reset_btn = camera1_widgets["zoom_reset_btn"]
+        self.cam1_image_scroll = camera1_widgets["image_scroll"]
+        self.cam1_image_label = camera1_widgets["image_label"]
+        cameras_layout.addWidget(camera1_widgets["group"])
 
-        # Image ID label
-        self.image_id_label = QLabel("Image ID: -")
-        self.image_id_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        self.image_id_label.setStyleSheet("QLabel { color: #495057; padding: 5px; }")
-        top_row.addWidget(self.image_id_label)
+        # Camera 2 (Right)
+        camera2_widgets = self.create_camera_viewer("Camera 2", "cam2")
+        self.cam2_image_id_label = camera2_widgets["image_id_label"]
+        self.cam2_device_label = camera2_widgets["device_label"]
+        self.cam2_zoom_reset_btn = camera2_widgets["zoom_reset_btn"]
+        self.cam2_image_scroll = camera2_widgets["image_scroll"]
+        self.cam2_image_label = camera2_widgets["image_label"]
+        cameras_layout.addWidget(camera2_widgets["group"])
 
-        top_row.addStretch()
+        main_layout.addLayout(cameras_layout)
 
-        # Zoom controls
-        self.zoom_out_btn = QPushButton("🔍-")
-        self.zoom_out_btn.setMaximumWidth(50)
-        self.zoom_out_btn.setToolTip("Zoom Out")
-        self.zoom_out_btn.clicked.connect(self.zoom_out)
-        top_row.addWidget(self.zoom_out_btn)
+        # Initialize camera state variables
+        self.cam1_pixmap = None
+        self.cam1_zoom = 0.25
+        self.cam1_device_id = None
 
-        self.zoom_reset_btn = QPushButton("25%")
-        self.zoom_reset_btn.setMaximumWidth(60)
-        self.zoom_reset_btn.setToolTip("Reset Zoom to 25%")
-        self.zoom_reset_btn.clicked.connect(self.zoom_reset)
-        top_row.addWidget(self.zoom_reset_btn)
+        self.cam2_pixmap = None
+        self.cam2_zoom = 0.25
+        self.cam2_device_id = None
 
-        self.zoom_in_btn = QPushButton("🔍+")
-        self.zoom_in_btn.setMaximumWidth(50)
-        self.zoom_in_btn.setToolTip("Zoom In")
-        self.zoom_in_btn.clicked.connect(self.zoom_in)
-        top_row.addWidget(self.zoom_in_btn)
-
-        self.fullscreen_btn = QPushButton("⛶")
-        self.fullscreen_btn.setMaximumWidth(50)
-        self.fullscreen_btn.setToolTip("Full Screen")
-        self.fullscreen_btn.clicked.connect(self.show_fullscreen)
-        top_row.addWidget(self.fullscreen_btn)
-
-        image_layout.addLayout(top_row)
-
-        # Scroll area for image (to support zoom)
-        self.image_scroll = QScrollArea()
-        self.image_scroll.setWidgetResizable(True)
-        self.image_scroll.setMinimumHeight(400)
-        self.image_scroll.setStyleSheet(
-            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }"
-        )
-
-        # Image label
-        self.image_label = QLabel("ยังไม่มีภาพ")
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setStyleSheet(
-            "QLabel { background-color: #e9ecef; color: #6c757d; "
-            "border: 1px solid #dee2e6; border-radius: 5px; "
-            "padding: 20px; font-size: 14px; }"
-        )
-        self.image_label.setMinimumSize(500, 400)
-        self.image_label.setScaledContents(False)
-
-        self.image_scroll.setWidget(self.image_label)
-        image_layout.addWidget(self.image_scroll)
-        image_group.setLayout(image_layout)
-        info_image_layout.addWidget(image_group, 1)  # Give more space to image
-
-        main_layout.addLayout(info_image_layout)
-
-        # Initialize zoom and image variables
-        self.current_pixmap = None  # Original pixmap with bounding boxes
-        self.zoom_level = 0.25  # Default zoom 25%
+        self.latest_camera = None  # Track which camera received data last
 
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
@@ -286,6 +244,87 @@ class MVITriggerGUI(QMainWindow):
                 padding: 0 5px;
             }
         """)
+
+    def create_camera_viewer(self, title, camera_id):
+        """Create a camera viewer widget with zoom controls"""
+        group = QGroupBox(title)
+        layout = QVBoxLayout()
+
+        # Top row: Device ID, Image ID and Controls
+        top_row = QHBoxLayout()
+
+        # Device ID label
+        device_label = QLabel("Device: -")
+        device_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+        device_label.setStyleSheet("QLabel { color: #0056b3; padding: 3px; }")
+        top_row.addWidget(device_label)
+
+        # Image ID label
+        image_id_label = QLabel("Image: -")
+        image_id_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+        image_id_label.setStyleSheet("QLabel { color: #495057; padding: 3px; }")
+        top_row.addWidget(image_id_label)
+
+        top_row.addStretch()
+
+        # Zoom controls
+        zoom_out_btn = QPushButton("🔍-")
+        zoom_out_btn.setMaximumWidth(45)
+        zoom_out_btn.setToolTip("Zoom Out")
+        zoom_out_btn.clicked.connect(lambda: self.camera_zoom_out(camera_id))
+        top_row.addWidget(zoom_out_btn)
+
+        zoom_reset_btn = QPushButton("25%")
+        zoom_reset_btn.setMaximumWidth(55)
+        zoom_reset_btn.setToolTip("Reset Zoom to 25%")
+        zoom_reset_btn.clicked.connect(lambda: self.camera_zoom_reset(camera_id))
+        top_row.addWidget(zoom_reset_btn)
+
+        zoom_in_btn = QPushButton("🔍+")
+        zoom_in_btn.setMaximumWidth(45)
+        zoom_in_btn.setToolTip("Zoom In")
+        zoom_in_btn.clicked.connect(lambda: self.camera_zoom_in(camera_id))
+        top_row.addWidget(zoom_in_btn)
+
+        fullscreen_btn = QPushButton("⛶")
+        fullscreen_btn.setMaximumWidth(45)
+        fullscreen_btn.setToolTip("Full Screen")
+        fullscreen_btn.clicked.connect(lambda: self.camera_show_fullscreen(camera_id))
+        top_row.addWidget(fullscreen_btn)
+
+        layout.addLayout(top_row)
+
+        # Scroll area for image
+        image_scroll = QScrollArea()
+        image_scroll.setWidgetResizable(True)
+        image_scroll.setMinimumHeight(350)
+        image_scroll.setStyleSheet(
+            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }"
+        )
+
+        # Image label
+        image_label = QLabel("ยังไม่มีภาพ")
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_label.setStyleSheet(
+            "QLabel { background-color: #e9ecef; color: #6c757d; "
+            "border: 1px solid #dee2e6; border-radius: 5px; "
+            "padding: 20px; font-size: 12px; }"
+        )
+        image_label.setMinimumSize(400, 300)
+        image_label.setScaledContents(False)
+
+        image_scroll.setWidget(image_label)
+        layout.addWidget(image_scroll)
+        group.setLayout(layout)
+
+        return {
+            "group": group,
+            "device_label": device_label,
+            "image_id_label": image_id_label,
+            "zoom_reset_btn": zoom_reset_btn,
+            "image_scroll": image_scroll,
+            "image_label": image_label
+        }
 
     def update_topic_list(self):
         """Update topic combo box with current topics"""
@@ -424,20 +463,16 @@ class MVITriggerGUI(QMainWindow):
             QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
             return
 
-        # Reset status, metadata, and image
+        # Reset status and metadata
         self.status_label.setText("กำลังตรวจสอบ...")
         self.status_label.setStyleSheet(
             "QLabel { background-color: #ffc107; color: black; "
             "border-radius: 10px; padding: 20px; }"
         )
         self.metadata_label.setText("<i>กำลังรอผลลัพธ์...</i>")
-        self.image_id_label.setText("Image ID: -")
-        self.image_label.clear()
-        self.image_label.setText("กำลังรอภาพ...")
-        self.image_label.setStyleSheet(
-            "QLabel { background-color: #e9ecef; color: #6c757d; "
-            "padding: 40px; font-size: 14px; }"
-        )
+
+        # Note: Don't clear camera images on trigger
+        # They will be updated when new MQTT messages arrive
 
         # Prepare trigger message
         trigger_msg = {
@@ -480,6 +515,7 @@ class MVITriggerGUI(QMainWindow):
         # Define metadata fields to display (in Thai)
         # Each field can have multiple possible keys (case-insensitive)
         metadata_fields = {
+            "Device ID": ["Device ID", "device_id", "DeviceID", "deviceId"],
             "กฎการตรวจสอบ": ["Rule", "rule", "RuleName", "rule_name"],
             "ชื่อไฟล์ต้นฉบับ": ["Original file name", "original_file_name", "filename", "FileName"],
             "วันที่บันทึก": ["Capture date", "capture_date", "Date sent", "date"],
@@ -566,21 +602,72 @@ class MVITriggerGUI(QMainWindow):
         self.metadata_label.setText(metadata_text)
 
     def display_image(self, data):
-        """Display image from MVI inspection result"""
-        # Try to get Image ID
+        """Display image from MVI inspection result with dual camera support"""
+        # Get Device ID to determine which camera
+        device_id = data.get("Device ID", "")
+
+        # Get Image ID
         image_id = data.get("Image ID", "")
 
-        # Try to get Image Path
+        # Get Image Path
         image_path = data.get("Image Path", "")
 
-        # Try to get Detected Objects
+        # Get Detected Objects
         detected_objects = data.get("Detected Objects", [])
 
-        # Update Image ID label
-        if image_id:
-            self.image_id_label.setText(f"Image ID: {image_id}")
+        # Determine which camera to update based on Device ID
+        # If no device ID mapping exists, assign to first available camera
+        camera_id = None
+
+        if device_id:
+            # Check if this device_id is already assigned to a camera
+            if self.cam1_device_id == device_id:
+                camera_id = "cam1"
+            elif self.cam2_device_id == device_id:
+                camera_id = "cam2"
+            elif self.cam1_device_id is None:
+                # Assign to camera 1 if empty
+                camera_id = "cam1"
+                self.cam1_device_id = device_id
+            elif self.cam2_device_id is None:
+                # Assign to camera 2 if empty
+                camera_id = "cam2"
+                self.cam2_device_id = device_id
+            else:
+                # Both cameras occupied, use camera 1 as default
+                camera_id = "cam1"
+                self.cam1_device_id = device_id
         else:
-            self.image_id_label.setText("Image ID: -")
+            # No device ID provided, use camera 1 as default
+            camera_id = "cam1"
+
+        print(f"📷 Displaying on {camera_id.upper()}: Device={device_id}, Image={image_id}")
+
+        # Get the appropriate widgets for this camera
+        if camera_id == "cam1":
+            image_label = self.cam1_image_label
+            image_id_label = self.cam1_image_id_label
+            device_label = self.cam1_device_label
+            zoom_reset_btn = self.cam1_zoom_reset_btn
+        else:  # cam2
+            image_label = self.cam2_image_label
+            image_id_label = self.cam2_image_id_label
+            device_label = self.cam2_device_label
+            zoom_reset_btn = self.cam2_zoom_reset_btn
+
+        # Update labels
+        if device_id:
+            device_label.setText(f"Device: {device_id}")
+        else:
+            device_label.setText("Device: -")
+
+        if image_id:
+            image_id_label.setText(f"Image: {image_id}")
+        else:
+            image_id_label.setText("Image: -")
+
+        # Track latest camera for metadata display
+        self.latest_camera = camera_id
 
         # Try to load and display image
         if image_path and os.path.exists(image_path):
@@ -594,43 +681,48 @@ class MVITriggerGUI(QMainWindow):
                         print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
 
                     # Store original pixmap and reset zoom to 25%
-                    self.current_pixmap = pixmap
-                    self.zoom_level = 0.25
-                    self.zoom_reset_btn.setText("25%")
+                    if camera_id == "cam1":
+                        self.cam1_pixmap = pixmap
+                        self.cam1_zoom = 0.25
+                    else:
+                        self.cam2_pixmap = pixmap
+                        self.cam2_zoom = 0.25
+
+                    zoom_reset_btn.setText("25%")
 
                     # Apply current zoom level
-                    self.apply_zoom()
+                    self.camera_apply_zoom(camera_id)
 
                     print(f"✓ โหลดภาพสำเร็จ: {image_path} (ขนาดต้นฉบับ: {pixmap.width()}x{pixmap.height()})")
                 else:
-                    self.image_label.clear()
-                    self.image_label.setText(f"ไม่สามารถโหลดภาพได้\n{image_path}")
+                    image_label.clear()
+                    image_label.setText(f"ไม่สามารถโหลดภาพได้\n{image_path}")
                     print(f"⚠️ ไม่สามารถโหลดภาพ: {image_path}")
 
             except Exception as e:
-                self.image_label.clear()
-                self.image_label.setText(f"เกิดข้อผิดพลาดในการโหลดภาพ\n{str(e)}")
+                image_label.clear()
+                image_label.setText(f"เกิดข้อผิดพลาดในการโหลดภาพ\n{str(e)}")
                 print(f"❌ Error loading image: {e}")
 
         elif image_path:
             # Path provided but file doesn't exist
-            self.image_label.clear()
-            self.image_label.setText(f"ไม่พบไฟล์ภาพ\n{image_path}")
-            self.image_label.setStyleSheet(
+            image_label.clear()
+            image_label.setText(f"ไม่พบไฟล์ภาพ\n{image_path}")
+            image_label.setStyleSheet(
                 "QLabel { background-color: #e9ecef; color: #6c757d; "
                 "border: 1px solid #dee2e6; border-radius: 5px; "
-                "padding: 20px; font-size: 14px; }"
+                "padding: 20px; font-size: 12px; }"
             )
             print(f"⚠️ ไม่พบไฟล์ภาพ: {image_path}")
 
         else:
             # No image path provided
-            self.image_label.clear()
-            self.image_label.setText("ยังไม่มีภาพ")
-            self.image_label.setStyleSheet(
+            image_label.clear()
+            image_label.setText("ยังไม่มีภาพ")
+            image_label.setStyleSheet(
                 "QLabel { background-color: #e9ecef; color: #6c757d; "
                 "border: 1px solid #dee2e6; border-radius: 5px; "
-                "padding: 20px; font-size: 14px; }"
+                "padding: 20px; font-size: 12px; }"
             )
             print("ℹ️ ไม่มี Image Path ในข้อมูล MQTT")
 
@@ -707,55 +799,93 @@ class MVITriggerGUI(QMainWindow):
 
         return result_pixmap
 
-    def apply_zoom(self):
-        """Apply current zoom level to image"""
-        if self.current_pixmap and not self.current_pixmap.isNull():
+    def camera_apply_zoom(self, camera_id):
+        """Apply current zoom level to camera image"""
+        if camera_id == "cam1":
+            pixmap = self.cam1_pixmap
+            zoom_level = self.cam1_zoom
+            image_label = self.cam1_image_label
+            zoom_reset_btn = self.cam1_zoom_reset_btn
+        else:  # cam2
+            pixmap = self.cam2_pixmap
+            zoom_level = self.cam2_zoom
+            image_label = self.cam2_image_label
+            zoom_reset_btn = self.cam2_zoom_reset_btn
+
+        if pixmap and not pixmap.isNull():
             # Calculate new size based on zoom level
-            new_width = int(self.current_pixmap.width() * self.zoom_level)
-            new_height = int(self.current_pixmap.height() * self.zoom_level)
+            new_width = int(pixmap.width() * zoom_level)
+            new_height = int(pixmap.height() * zoom_level)
 
             # Scale pixmap
-            scaled_pixmap = self.current_pixmap.scaled(
+            scaled_pixmap = pixmap.scaled(
                 new_width, new_height,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
 
-            self.image_label.setPixmap(scaled_pixmap)
-            self.image_label.setStyleSheet(
+            image_label.setPixmap(scaled_pixmap)
+            image_label.setStyleSheet(
                 "QLabel { background-color: #e9ecef; "
                 "border: 1px solid #dee2e6; border-radius: 5px; }"
             )
-            self.image_label.resize(scaled_pixmap.size())
+            image_label.resize(scaled_pixmap.size())
 
             # Update zoom button text
-            self.zoom_reset_btn.setText(f"{int(self.zoom_level * 100)}%")
+            zoom_reset_btn.setText(f"{int(zoom_level * 100)}%")
 
-    def zoom_in(self):
-        """Zoom in on image"""
-        if self.current_pixmap:
-            self.zoom_level = min(self.zoom_level + 0.25, 5.0)  # Max 500%
-            self.apply_zoom()
-            print(f"🔍 Zoom In: {int(self.zoom_level * 100)}%")
+    def camera_zoom_in(self, camera_id):
+        """Zoom in on camera image"""
+        if camera_id == "cam1":
+            if self.cam1_pixmap:
+                self.cam1_zoom = min(self.cam1_zoom + 0.25, 5.0)  # Max 500%
+                self.camera_apply_zoom(camera_id)
+                print(f"🔍 CAM1 Zoom In: {int(self.cam1_zoom * 100)}%")
+        else:  # cam2
+            if self.cam2_pixmap:
+                self.cam2_zoom = min(self.cam2_zoom + 0.25, 5.0)  # Max 500%
+                self.camera_apply_zoom(camera_id)
+                print(f"🔍 CAM2 Zoom In: {int(self.cam2_zoom * 100)}%")
 
-    def zoom_out(self):
-        """Zoom out on image"""
-        if self.current_pixmap:
-            self.zoom_level = max(self.zoom_level - 0.25, 0.25)  # Min 25%
-            self.apply_zoom()
-            print(f"🔍 Zoom Out: {int(self.zoom_level * 100)}%")
+    def camera_zoom_out(self, camera_id):
+        """Zoom out on camera image"""
+        if camera_id == "cam1":
+            if self.cam1_pixmap:
+                self.cam1_zoom = max(self.cam1_zoom - 0.25, 0.25)  # Min 25%
+                self.camera_apply_zoom(camera_id)
+                print(f"🔍 CAM1 Zoom Out: {int(self.cam1_zoom * 100)}%")
+        else:  # cam2
+            if self.cam2_pixmap:
+                self.cam2_zoom = max(self.cam2_zoom - 0.25, 0.25)  # Min 25%
+                self.camera_apply_zoom(camera_id)
+                print(f"🔍 CAM2 Zoom Out: {int(self.cam2_zoom * 100)}%")
 
-    def zoom_reset(self):
-        """Reset zoom to 25%"""
-        if self.current_pixmap:
-            self.zoom_level = 0.25
-            self.apply_zoom()
-            print(f"🔍 Zoom Reset: 25%")
+    def camera_zoom_reset(self, camera_id):
+        """Reset camera zoom to 25%"""
+        if camera_id == "cam1":
+            if self.cam1_pixmap:
+                self.cam1_zoom = 0.25
+                self.camera_apply_zoom(camera_id)
+                print(f"🔍 CAM1 Zoom Reset: 25%")
+        else:  # cam2
+            if self.cam2_pixmap:
+                self.cam2_zoom = 0.25
+                self.camera_apply_zoom(camera_id)
+                print(f"🔍 CAM2 Zoom Reset: 25%")
 
-    def show_fullscreen(self):
-        """Show image in fullscreen mode"""
-        if self.current_pixmap and not self.current_pixmap.isNull():
-            fullscreen_dialog = FullscreenImageDialog(self.current_pixmap, self.image_id_label.text(), self)
+    def camera_show_fullscreen(self, camera_id):
+        """Show camera image in fullscreen mode"""
+        if camera_id == "cam1":
+            pixmap = self.cam1_pixmap
+            image_id = self.cam1_image_id_label.text()
+            device_id = self.cam1_device_label.text()
+        else:  # cam2
+            pixmap = self.cam2_pixmap
+            image_id = self.cam2_image_id_label.text()
+            device_id = self.cam2_device_label.text()
+
+        if pixmap and not pixmap.isNull():
+            fullscreen_dialog = FullscreenImageDialog(pixmap, f"{device_id} | {image_id}", self)
             fullscreen_dialog.exec()
 
     def closeEvent(self, event):
