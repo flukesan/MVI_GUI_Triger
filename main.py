@@ -12,7 +12,7 @@ try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget
     )
     from PyQt6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
     from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
@@ -21,13 +21,15 @@ except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget
     )
     from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
     from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
     print("Using PySide6")
 
 from mqtt_client import MQTTClient
+from history_manager import HistoryManager
+from history_widget import HistoryWidget
 
 
 class AddTopicDialog(QDialog):
@@ -72,6 +74,7 @@ class MVITriggerGUI(QMainWindow):
         self.config_file = Path("config.json")
         self.config = self.load_config()
         self.mqtt_client = None
+        self.history_manager = HistoryManager()  # Initialize history manager
         self.init_ui()
         self.init_mqtt()
 
@@ -97,10 +100,67 @@ class MVITriggerGUI(QMainWindow):
         self.setWindowTitle("MVI Edge Inspection Trigger")
         self.setMinimumSize(1100, 750)
 
-        # Central widget
+        # Central widget with tabs
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+
+        # Create tab widget
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+            }
+            QTabBar::tab {
+                background: #e9ecef;
+                padding: 10px 30px;
+                margin-right: 2px;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+            }
+            QTabBar::tab:selected {
+                background: #007bff;
+                color: white;
+            }
+        """)
+
+        # Create Live tab
+        self.live_widget = QWidget()
+        self.init_live_tab()
+        self.tabs.addTab(self.live_widget, "🔴 Live")
+
+        # Create History tab
+        self.history_widget = HistoryWidget()
+        self.tabs.addTab(self.history_widget, "📋 History")
+
+        main_layout.addWidget(self.tabs)
+
+        # ========== Status Bar ==========
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
+        self.statusBar.showMessage("พร้อมใช้งาน")
+
+        # Style
+        self.setStyleSheet("""
+            QGroupBox {
+                font-size: 14px;
+                font-weight: bold;
+                border: 2px solid #ccc;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+
+    def init_live_tab(self):
+        """Initialize Live monitoring tab"""
+        live_layout = QVBoxLayout(self.live_widget)
 
         # ========== MQTT Connection Status ==========
         connection_group = QGroupBox("MQTT Connection")
@@ -114,7 +174,7 @@ class MVITriggerGUI(QMainWindow):
 
         connection_layout.addWidget(self.connection_label)
         connection_group.setLayout(connection_layout)
-        main_layout.addWidget(connection_group)
+        live_layout.addWidget(connection_group)
 
         # ========== Topic Selection + Trigger Button ==========
         topic_group = QGroupBox("เลือก Topic สำหรับ Trigger")
@@ -160,7 +220,7 @@ class MVITriggerGUI(QMainWindow):
         topic_layout.addWidget(self.remove_topic_btn)
         topic_layout.addWidget(self.trigger_btn, 2)
         topic_group.setLayout(topic_layout)
-        main_layout.addWidget(topic_group)
+        live_layout.addWidget(topic_group)
 
         # ========== Dual Camera Display (Side by Side) ==========
         cameras_layout = QHBoxLayout()
@@ -187,7 +247,7 @@ class MVITriggerGUI(QMainWindow):
         self.cam2_status_label = camera2_widgets["status_label"]
         cameras_layout.addWidget(camera2_widgets["group"])
 
-        main_layout.addLayout(cameras_layout)
+        live_layout.addLayout(cameras_layout)
 
         # Initialize camera state variables
         self.cam1_pixmap = None
@@ -204,28 +264,6 @@ class MVITriggerGUI(QMainWindow):
         self.trigger_timer = QTimer()
         self.trigger_timer.timeout.connect(self.on_trigger_timeout)
         self.trigger_timer.setSingleShot(True)
-
-        # ========== Status Bar ==========
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
-        self.statusBar.showMessage("พร้อมใช้งาน")
-
-        # Style
-        self.setStyleSheet("""
-            QGroupBox {
-                font-size: 14px;
-                font-weight: bold;
-                border: 2px solid #ccc;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }
-        """)
 
     def create_camera_viewer(self, title, camera_id):
         """Create a camera viewer widget with metadata panel (left) and image (right)"""
@@ -729,6 +767,9 @@ class MVITriggerGUI(QMainWindow):
         # Track latest camera
         self.latest_camera = camera_id
 
+        # Save to history (will save after image is loaded)
+        image_pixmap_for_history = None
+
         # Try to load and display image
         if image_path and os.path.exists(image_path):
             try:
@@ -739,6 +780,9 @@ class MVITriggerGUI(QMainWindow):
                     if detected_objects and isinstance(detected_objects, list) and len(detected_objects) > 0:
                         pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
                         print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
+
+                    # Save pixmap for history
+                    image_pixmap_for_history = pixmap
 
                     # Store original pixmap and reset zoom to 25%
                     if camera_id == "cam1":
@@ -785,6 +829,15 @@ class MVITriggerGUI(QMainWindow):
                 "padding: 20px; font-size: 12px; }"
             )
             print("ℹ️ ไม่มี Image Path ในข้อมูล MQTT")
+
+        # Save to history database
+        try:
+            self.history_manager.save_inspection(data, image_pixmap_for_history)
+            # Refresh history tab if it's visible
+            if self.tabs.currentIndex() == 1:  # History tab
+                self.history_widget.load_history()
+        except Exception as e:
+            print(f"⚠️ Failed to save to history: {e}")
 
     def draw_bounding_boxes(self, pixmap, detected_objects):
         """Draw bounding boxes, labels, and scores on image"""
