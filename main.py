@@ -200,6 +200,11 @@ class MVITriggerGUI(QMainWindow):
 
         self.latest_camera = None  # Track which camera received data last
 
+        # Trigger timeout timer
+        self.trigger_timer = QTimer()
+        self.trigger_timer.timeout.connect(self.on_trigger_timeout)
+        self.trigger_timer.setSingleShot(True)
+
         # ========== Status Bar ==========
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
@@ -447,6 +452,9 @@ class MVITriggerGUI(QMainWindow):
         self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
         self.trigger_btn.setEnabled(False)  # Disable during inspection
 
+        # Start timeout timer (30 seconds)
+        self.trigger_timer.start(30000)  # 30000ms = 30 seconds
+
         # Prepare trigger message
         trigger_msg = {
             "action": "trigger",
@@ -460,6 +468,7 @@ class MVITriggerGUI(QMainWindow):
         else:
             QMessageBox.warning(self, "Error", "ไม่สามารถส่ง trigger ได้")
             # Reset button if failed
+            self.trigger_timer.stop()
             self.trigger_btn.setText("🔘 TRIGGER")
             self.trigger_btn.setEnabled(True)
 
@@ -497,6 +506,7 @@ class MVITriggerGUI(QMainWindow):
             self.reset_trigger_button()
         else:
             # Try case-insensitive search
+            found = False
             for key in data.keys():
                 if key.lower() in ["overall result", "result"]:
                     result_val = str(data[key]).lower()
@@ -508,9 +518,8 @@ class MVITriggerGUI(QMainWindow):
                         )
                         status_label.setVisible(True)
                         print(f"✓ {camera_id.upper()}: PASS")
-                        # Reset trigger button
-                        self.reset_trigger_button()
-                        return
+                        found = True
+                        break
                     elif result_val == "fail":
                         status_label.setText("✗ FAIL")
                         status_label.setStyleSheet(
@@ -519,14 +528,32 @@ class MVITriggerGUI(QMainWindow):
                         )
                         status_label.setVisible(True)
                         print(f"✗ {camera_id.upper()}: FAIL")
-                        # Reset trigger button
-                        self.reset_trigger_button()
-                        return
+                        found = True
+                        break
+
+            # Reset trigger button whether result was found or not
+            # This prevents button from being stuck if no result field exists
+            self.reset_trigger_button()
+
+            if not found:
+                print(f"⚠️ {camera_id.upper()}: No result field found, but resetting trigger button")
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
+        # Stop timeout timer if running
+        if self.trigger_timer.isActive():
+            self.trigger_timer.stop()
+
         self.trigger_btn.setText("🔘 TRIGGER")
         self.trigger_btn.setEnabled(True)
+        print("🔄 Trigger button reset")
+
+    def on_trigger_timeout(self):
+        """Handle trigger timeout (no response received)"""
+        print("⏱️ Trigger timeout - no response received within 30 seconds")
+        self.trigger_btn.setText("🔘 TRIGGER")
+        self.trigger_btn.setEnabled(True)
+        self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
 
     def display_metadata(self, camera_id, data):
         """Display metadata from MVI inspection result for specific camera"""
