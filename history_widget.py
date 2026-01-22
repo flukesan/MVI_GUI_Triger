@@ -111,13 +111,15 @@ class HistoryWidget(QWidget):
 
         # === History Table ===
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
-            "Time", "Device", "Result", "Station", "Image ID", "Actions", "ID"
+            "Date", "Time", "Device", "Result", "Station", "Image ID", "Actions", "ID"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.setColumnWidth(5, 150)  # Actions column
-        self.table.setColumnWidth(6, 60)   # ID column
+        self.table.setColumnWidth(0, 100)  # Date column
+        self.table.setColumnWidth(1, 80)   # Time column
+        self.table.setColumnWidth(6, 150)  # Actions column
+        self.table.setColumnWidth(7, 60)   # ID column
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         layout.addWidget(self.table)
@@ -180,12 +182,22 @@ class HistoryWidget(QWidget):
         # Update table
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
+            # Split timestamp into date and time
+            timestamp = record["timestamp"]
+            if " " in timestamp:
+                date_str, time_str = timestamp.split(" ", 1)
+            else:
+                date_str = ""
+                time_str = timestamp
+
+            # Date
+            self.table.setItem(row, 0, QTableWidgetItem(date_str))
+
             # Time
-            time_str = record["timestamp"].split()[1] if " " in record["timestamp"] else record["timestamp"]
-            self.table.setItem(row, 0, QTableWidgetItem(time_str))
+            self.table.setItem(row, 1, QTableWidgetItem(time_str))
 
             # Device
-            self.table.setItem(row, 1, QTableWidgetItem(record["device_id"] or "-"))
+            self.table.setItem(row, 2, QTableWidgetItem(record["device_id"] or "-"))
 
             # Result
             result_item = QTableWidgetItem(f"{record['result'].upper()}")
@@ -193,24 +205,24 @@ class HistoryWidget(QWidget):
                 result_item.setForeground(Qt.GlobalColor.darkGreen)
             elif record["result"] == "fail":
                 result_item.setForeground(Qt.GlobalColor.red)
-            self.table.setItem(row, 2, result_item)
+            self.table.setItem(row, 3, result_item)
 
             # Station
-            self.table.setItem(row, 3, QTableWidgetItem(record["station"] or "-"))
+            self.table.setItem(row, 4, QTableWidgetItem(record["station"] or "-"))
 
             # Image ID (truncated)
             image_id = record["image_id"] or "-"
             if len(image_id) > 15:
                 image_id = image_id[:12] + "..."
-            self.table.setItem(row, 4, QTableWidgetItem(image_id))
+            self.table.setItem(row, 5, QTableWidgetItem(image_id))
 
             # Actions - View button
             view_btn = QPushButton("👁️ View")
             view_btn.clicked.connect(lambda checked, r=record: self.view_detail(r))
-            self.table.setCellWidget(row, 5, view_btn)
+            self.table.setCellWidget(row, 6, view_btn)
 
             # ID (hidden column for reference)
-            self.table.setItem(row, 6, QTableWidgetItem(str(record["id"])))
+            self.table.setItem(row, 7, QTableWidgetItem(str(record["id"])))
 
         # Update pagination
         total_pages = (total_count + self.page_size - 1) // self.page_size
