@@ -686,9 +686,13 @@ class MVITriggerGUI(QMainWindow):
             print(json.dumps(data, indent=2, ensure_ascii=False))
             print("="*60 + "\n")
 
-            # Track response for multi-topic trigger
-            # Convert result topic (mvi/model1/result) to trigger topic (mvi/model1/trigger)
-            trigger_topic = topic.replace("/result", "/trigger")
+            # Extract and display image FIRST (metadata and status will be updated inside display_image)
+            self.display_image(data)
+
+            # Track response for multi-topic trigger (AFTER displaying)
+            # Convert result topic to trigger topic if needed
+            # Support both formats: "xxx/result" → "xxx/trigger" and "xxx" → "xxx"
+            trigger_topic = topic.replace("/result", "/trigger") if "/result" in topic else topic
 
             if trigger_topic in self.pending_topics:
                 # Remove from pending and store response
@@ -705,10 +709,7 @@ class MVITriggerGUI(QMainWindow):
                 if len(self.pending_topics) == 0:
                     print("✓ All responses received!")
                     self.trigger_timer.stop()
-                    self.reset_trigger_button()
-
-            # Extract and display image (metadata and status will be updated inside display_image)
-            self.display_image(data)
+                    self.reset_trigger_button()  # Reset button after all responses received
 
         except json.JSONDecodeError:
             # Not JSON, just log it
@@ -862,6 +863,11 @@ class MVITriggerGUI(QMainWindow):
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
+        # Check if we're still waiting for responses in multi-topic mode
+        if len(self.pending_topics) > 0:
+            print(f"⏳ Still waiting for {len(self.pending_topics)} topic(s)...")
+            return  # Don't reset yet, still waiting
+
         # Stop timeout timer if running
         if self.trigger_timer.isActive():
             self.trigger_timer.stop()
