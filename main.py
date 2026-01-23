@@ -726,13 +726,20 @@ class MVITriggerGUI(QMainWindow):
 
     def trigger_inspection(self):
         """Trigger MVI inspection (single or multiple topics)"""
+        print("\n" + "=" * 60)
+        print("🚀 trigger_inspection() CALLED!")
+        print(f"   Mode: {'Single' if self.single_mode_radio.isChecked() else 'Multiple'}")
+        print("=" * 60)
+
         topics_to_trigger = []
 
         # Determine which topics to trigger based on mode
         if self.single_mode_radio.isChecked():
             # Single topic mode
             current_topic = self.topic_combo.currentText()
+            print(f"📋 Single mode: current_topic = '{current_topic}'")
             if not current_topic:
+                print("⚠️ No topic selected! Showing warning...")
                 QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
                 return
             topics_to_trigger = [current_topic]
@@ -742,9 +749,13 @@ class MVITriggerGUI(QMainWindow):
                 if checkbox.isChecked():
                     topics_to_trigger.append(checkbox.text())
 
+            print(f"📋 Multiple mode: {len(topics_to_trigger)} topics selected")
             if len(topics_to_trigger) == 0:
+                print("⚠️ No topics selected! Showing warning...")
                 QMessageBox.warning(self, "Warning", "กรุณาเลือกอย่างน้อย 1 topic")
                 return
+
+        print(f"✓ Topics to trigger: {topics_to_trigger}")
 
         # Initialize pending topics tracking
         self.pending_topics = set(topics_to_trigger)
