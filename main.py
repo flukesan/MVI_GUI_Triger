@@ -753,12 +753,17 @@ class MVITriggerGUI(QMainWindow):
         # Update button text
         if len(topics_to_trigger) == 1:
             self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
+            print(f"🔘 Button text set to: '⏳ กำลังตรวจสอบ'")
         else:
             self.trigger_btn.setText(f"⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)")
+            print(f"🔘 Button text set to: '⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)'")
+
         self.trigger_btn.setEnabled(False)  # Disable during inspection
+        print(f"🔘 Button disabled: {not self.trigger_btn.isEnabled()}")
 
         # Start timeout timer (30 seconds)
         self.trigger_timer.start(30000)  # 30000ms = 30 seconds
+        print(f"⏱️ Timeout timer started: 30 seconds")
 
         # Prepare trigger message
         trigger_msg = {
@@ -863,9 +868,11 @@ class MVITriggerGUI(QMainWindow):
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
+        print(f"🔄 reset_trigger_button() called, pending_topics={len(self.pending_topics)}")
+
         # Check if we're still waiting for responses in multi-topic mode
         if len(self.pending_topics) > 0:
-            print(f"⏳ Still waiting for {len(self.pending_topics)} topic(s)...")
+            print(f"⏳ Still waiting for {len(self.pending_topics)} topic(s)... NOT resetting button")
             return  # Don't reset yet, still waiting
 
         # Stop timeout timer if running
@@ -874,7 +881,7 @@ class MVITriggerGUI(QMainWindow):
 
         self.trigger_btn.setText("🔘 TRIGGER")
         self.trigger_btn.setEnabled(True)
-        print("🔄 Trigger button reset")
+        print("🔄 Trigger button reset to '🔘 TRIGGER' and enabled")
 
     def on_trigger_timeout(self):
         """Handle trigger timeout (no response received)"""
@@ -1089,9 +1096,10 @@ class MVITriggerGUI(QMainWindow):
                 camera_id = "cam2"
                 self.cam2_device_id = device_id
             else:
-                # Both cameras occupied, use camera 1 as default
+                # Both cameras occupied, show on cam1 temporarily but DON'T override device_id
+                # This allows seeing new device data without losing existing camera assignments
                 camera_id = "cam1"
-                self.cam1_device_id = device_id
+                print(f"⚠️ Both cameras occupied. Showing {device_id} on cam1 temporarily (cam1 still assigned to {self.cam1_device_id})")
         else:
             # No device ID provided, use camera 1 as default
             camera_id = "cam1"
