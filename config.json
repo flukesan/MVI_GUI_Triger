@@ -10,7 +10,7 @@
     "mvi/camera01/trigger",
     "mvi/camera02/trigger"
   ],
-  "subscribe_topic": "mvi/+/result",
+  "subscribe_topic": "#",
   "ui_state": {
     "trigger_mode": "single",
     "last_single_topic": "mvi/camera01/trigger",
