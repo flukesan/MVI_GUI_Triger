@@ -593,6 +593,26 @@ class MVITriggerGUI(QMainWindow):
         self.trigger_btn.setEnabled(True)
         self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
 
+        # Show popup with troubleshooting guide
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle("⚠️ Trigger Timeout")
+        msg_box.setText("ไม่ได้รับผลการตรวจสอบภายใน 30 วินาที")
+        msg_box.setInformativeText(
+            "กรุณาตรวจสอบสาเหตุที่อาจทำให้เกิดปัญหา:\n\n"
+            "1. ตรวจสอบการเชื่อมต่อ MQTT\n"
+            "   - ตรวจสอบว่า MQTT Broker ทำงานอยู่หรือไม่\n"
+            "   - ตรวจสอบ IP Address และ Port ใน config.json\n\n"
+            "2. ตรวจสอบ Login เข้าหน้าเว็บ Maximo Visual Inspection Edge\n"
+            "   - ตรวจสอบว่า Login เข้าระบบได้หรือไม่\n"
+            "   - ตรวจสอบ Session ยังคงใช้งานได้อยู่\n\n"
+            "3. ตรวจสอบสถานะ Enabled Inspection Status\n"
+            "   - ตรวจสอบว่า Inspection ถูกเปิดใช้งานในระบบ MVI Edge\n"
+            "   - ตรวจสอบว่า Model พร้อมใช้งานและไม่มี Error"
+        )
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.exec()
+
     def display_metadata(self, camera_id, data):
         """Display metadata from MVI inspection result for specific camera"""
         # Define metadata fields to display (in Thai)
