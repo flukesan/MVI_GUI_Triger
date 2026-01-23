@@ -12,7 +12,8 @@ try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget,
+        QRadioButton, QCheckBox
     )
     from PyQt6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
     from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
@@ -21,7 +22,8 @@ except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
-        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget
+        QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget,
+        QRadioButton, QCheckBox
     )
     from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
     from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
@@ -76,6 +78,7 @@ class MVITriggerGUI(QMainWindow):
         self.mqtt_client = None
         self.history_manager = HistoryManager()  # Initialize history manager
         self.init_ui()
+        self.load_ui_state()  # Load saved UI state (mode and selections)
         self.init_mqtt()
 
     def load_config(self):
@@ -94,6 +97,64 @@ class MVITriggerGUI(QMainWindow):
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
         except Exception as e:
             QMessageBox.warning(self, "Warning", f"ไม่สามารถบันทึก config: {e}")
+
+    def save_ui_state(self):
+        """Save UI state (mode and selected topics) to config"""
+        try:
+            ui_state = {}
+
+            # Save trigger mode
+            if self.single_mode_radio.isChecked():
+                ui_state["trigger_mode"] = "single"
+                ui_state["last_single_topic"] = self.topic_combo.currentText()
+            else:
+                ui_state["trigger_mode"] = "multiple"
+                # Save selected topics in multiple mode
+                selected = []
+                for checkbox in self.topic_checkboxes:
+                    if checkbox.isChecked():
+                        selected.append(checkbox.text())
+                ui_state["selected_topics"] = selected
+
+            # Update config
+            self.config["ui_state"] = ui_state
+
+            # Save to file
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=2, ensure_ascii=False)
+
+        except Exception as e:
+            print(f"⚠️ Failed to save UI state: {e}")
+
+    def load_ui_state(self):
+        """Load UI state (mode and selected topics) from config"""
+        try:
+            ui_state = self.config.get("ui_state", {})
+
+            # Load trigger mode
+            mode = ui_state.get("trigger_mode", "single")
+            if mode == "multiple":
+                self.multi_mode_radio.setChecked(True)
+
+                # Load selected topics
+                selected_topics = ui_state.get("selected_topics", [])
+                for checkbox in self.topic_checkboxes:
+                    if checkbox.text() in selected_topics:
+                        checkbox.setChecked(True)
+            else:
+                self.single_mode_radio.setChecked(True)
+
+                # Load last selected topic in single mode
+                last_topic = ui_state.get("last_single_topic", "")
+                if last_topic:
+                    index = self.topic_combo.findText(last_topic)
+                    if index >= 0:
+                        self.topic_combo.setCurrentIndex(index)
+
+            print(f"✓ UI state loaded: mode={mode}")
+
+        except Exception as e:
+            print(f"⚠️ Failed to load UI state: {e}")
 
     def init_ui(self):
         """Initialize user interface"""
@@ -176,29 +237,112 @@ class MVITriggerGUI(QMainWindow):
         connection_group.setLayout(connection_layout)
         live_layout.addWidget(connection_group)
 
-        # ========== Topic Selection + Trigger Button ==========
-        topic_group = QGroupBox("เลือก Topic สำหรับ Trigger")
-        topic_layout = QHBoxLayout()
+        # ========== Topic Selection with Mode Toggle ==========
+        topic_group = QGroupBox("📡 เลือก Topic สำหรับ Trigger")
+        topic_main_layout = QVBoxLayout()
+
+        # Mode selection (Single or Multiple)
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Trigger Mode:"))
+
+        self.single_mode_radio = QRadioButton("Single Topic")
+        self.multi_mode_radio = QRadioButton("Multiple Topics")
+        self.single_mode_radio.setChecked(True)  # Default to Single mode
+        self.single_mode_radio.toggled.connect(self.on_mode_changed)
+
+        mode_layout.addWidget(self.single_mode_radio)
+        mode_layout.addWidget(self.multi_mode_radio)
+        mode_layout.addStretch()
+        topic_main_layout.addLayout(mode_layout)
+
+        # === Single Topic Mode UI ===
+        self.single_mode_widget = QWidget()
+        single_layout = QVBoxLayout()
+        single_layout.setContentsMargins(0, 10, 0, 0)
+
+        single_row = QHBoxLayout()
+        single_row.addWidget(QLabel("Topic:"))
 
         self.topic_combo = QComboBox()
-        self.topic_combo.setMinimumHeight(50)
-        self.topic_combo.setFont(QFont("Arial", 12))
+        self.topic_combo.setMinimumHeight(40)
+        self.topic_combo.setFont(QFont("Arial", 11))
         self.update_topic_list()
+        single_row.addWidget(self.topic_combo, 1)
 
-        # Add/Remove topic buttons
-        self.add_topic_btn = QPushButton("➕")
-        self.add_topic_btn.setMinimumHeight(50)
-        self.add_topic_btn.setMaximumWidth(50)
+        single_layout.addLayout(single_row)
+        self.single_mode_widget.setLayout(single_layout)
+        topic_main_layout.addWidget(self.single_mode_widget)
+
+        # === Multiple Topics Mode UI ===
+        self.multi_mode_widget = QWidget()
+        multi_layout = QVBoxLayout()
+        multi_layout.setContentsMargins(0, 10, 0, 0)
+
+        # Select All + Selected count
+        multi_top_row = QHBoxLayout()
+        self.select_all_checkbox = QCheckBox("Select All")
+        self.select_all_checkbox.stateChanged.connect(self.on_select_all_changed)
+        multi_top_row.addWidget(self.select_all_checkbox)
+
+        multi_top_row.addWidget(QLabel("|"))
+
+        self.selected_count_label = QLabel("Selected: 0/0")
+        self.selected_count_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.selected_count_label.setStyleSheet("QLabel { color: #0056b3; }")
+        multi_top_row.addWidget(self.selected_count_label)
+        multi_top_row.addStretch()
+
+        multi_layout.addLayout(multi_top_row)
+
+        # Checkbox list with scroll area (height for ~4 topics)
+        self.topics_scroll = QScrollArea()
+        self.topics_scroll.setWidgetResizable(True)
+        self.topics_scroll.setMinimumHeight(160)  # ~40px per checkbox * 4
+        self.topics_scroll.setMaximumHeight(160)
+        self.topics_scroll.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                background-color: white;
+            }
+        """)
+
+        self.topics_checkbox_widget = QWidget()
+        self.topics_checkbox_layout = QVBoxLayout()
+        self.topics_checkbox_layout.setContentsMargins(5, 5, 5, 5)
+        self.topics_checkbox_layout.setSpacing(5)
+
+        # Create checkboxes for each topic
+        self.topic_checkboxes = []
+        self.update_checkbox_list()
+
+        self.topics_checkbox_layout.addStretch()
+        self.topics_checkbox_widget.setLayout(self.topics_checkbox_layout)
+        self.topics_scroll.setWidget(self.topics_checkbox_widget)
+
+        multi_layout.addWidget(self.topics_scroll)
+        self.multi_mode_widget.setLayout(multi_layout)
+        self.multi_mode_widget.setVisible(False)  # Hidden by default
+        topic_main_layout.addWidget(self.multi_mode_widget)
+
+        # === Bottom row: Add/Remove/Trigger buttons ===
+        bottom_row = QHBoxLayout()
+
+        self.add_topic_btn = QPushButton("➕ Add Topic")
+        self.add_topic_btn.setMinimumHeight(40)
         self.add_topic_btn.setToolTip("เพิ่ม Topic")
         self.add_topic_btn.clicked.connect(self.add_topic)
+        bottom_row.addWidget(self.add_topic_btn)
 
-        self.remove_topic_btn = QPushButton("➖")
-        self.remove_topic_btn.setMinimumHeight(50)
-        self.remove_topic_btn.setMaximumWidth(50)
+        self.remove_topic_btn = QPushButton("➖ Remove Topic")
+        self.remove_topic_btn.setMinimumHeight(40)
         self.remove_topic_btn.setToolTip("ลบ Topic")
         self.remove_topic_btn.clicked.connect(self.remove_topic)
+        bottom_row.addWidget(self.remove_topic_btn)
 
-        # Trigger button (on the right)
+        bottom_row.addStretch()
+
+        # Trigger button
         self.trigger_btn = QPushButton("🔘 TRIGGER")
         self.trigger_btn.setMinimumHeight(50)
         self.trigger_btn.setMinimumWidth(150)
@@ -214,12 +358,10 @@ class MVITriggerGUI(QMainWindow):
         self.trigger_btn.setToolTip("กด Space bar เพื่อ Trigger")
         self.trigger_btn.clicked.connect(self.trigger_inspection)
         self.trigger_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        bottom_row.addWidget(self.trigger_btn)
 
-        topic_layout.addWidget(self.topic_combo, 7)
-        topic_layout.addWidget(self.add_topic_btn)
-        topic_layout.addWidget(self.remove_topic_btn)
-        topic_layout.addWidget(self.trigger_btn, 2)
-        topic_group.setLayout(topic_layout)
+        topic_main_layout.addLayout(bottom_row)
+        topic_group.setLayout(topic_main_layout)
         live_layout.addWidget(topic_group)
 
         # ========== Dual Camera Display (Side by Side) ==========
@@ -259,6 +401,10 @@ class MVITriggerGUI(QMainWindow):
         self.cam2_device_id = None
 
         self.latest_camera = None  # Track which camera received data last
+
+        # Multi-topic trigger tracking
+        self.pending_topics = set()  # Topics waiting for response
+        self.pending_responses = {}  # Collected responses {topic: response_data}
 
         # Trigger timeout timer
         self.trigger_timer = QTimer()
@@ -380,6 +526,73 @@ class MVITriggerGUI(QMainWindow):
         self.topic_combo.clear()
         self.topic_combo.addItems(self.config.get("topics", []))
 
+    def update_checkbox_list(self):
+        """Update checkbox list with current topics"""
+        # Clear existing checkboxes
+        for checkbox in self.topic_checkboxes:
+            self.topics_checkbox_layout.removeWidget(checkbox)
+            checkbox.deleteLater()
+        self.topic_checkboxes.clear()
+
+        # Create new checkboxes
+        for topic in self.config.get("topics", []):
+            checkbox = QCheckBox(topic)
+            checkbox.setFont(QFont("Arial", 10))
+            checkbox.stateChanged.connect(self.on_topic_selection_changed)
+            self.topics_checkbox_layout.insertWidget(len(self.topic_checkboxes), checkbox)
+            self.topic_checkboxes.append(checkbox)
+
+        self.update_selected_count()
+
+    def on_mode_changed(self):
+        """Handle mode change between Single and Multiple"""
+        is_single_mode = self.single_mode_radio.isChecked()
+
+        # Show/hide appropriate widgets
+        self.single_mode_widget.setVisible(is_single_mode)
+        self.multi_mode_widget.setVisible(not is_single_mode)
+
+        # Save UI state
+        self.save_ui_state()
+
+    def on_select_all_changed(self, state):
+        """Handle Select All checkbox state change"""
+        is_checked = state == Qt.CheckState.Checked.value
+
+        # Block signals to avoid triggering update for each checkbox
+        for checkbox in self.topic_checkboxes:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(is_checked)
+            checkbox.blockSignals(False)
+
+        self.update_selected_count()
+        self.save_ui_state()
+
+    def on_topic_selection_changed(self):
+        """Handle individual topic checkbox state change"""
+        self.update_selected_count()
+        self.save_ui_state()
+
+    def update_selected_count(self):
+        """Update the selected count label"""
+        selected_count = sum(1 for cb in self.topic_checkboxes if cb.isChecked())
+        total_count = len(self.topic_checkboxes)
+        self.selected_count_label.setText(f"Selected: {selected_count}/{total_count}")
+
+        # Update Select All checkbox state
+        if selected_count == 0:
+            self.select_all_checkbox.blockSignals(True)
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Unchecked)
+            self.select_all_checkbox.blockSignals(False)
+        elif selected_count == total_count:
+            self.select_all_checkbox.blockSignals(True)
+            self.select_all_checkbox.setCheckState(Qt.CheckState.Checked)
+            self.select_all_checkbox.blockSignals(False)
+        else:
+            self.select_all_checkbox.blockSignals(True)
+            self.select_all_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
+            self.select_all_checkbox.blockSignals(False)
+
     def add_topic(self):
         """Add new topic to the list"""
         dialog = AddTopicDialog(self)
@@ -390,6 +603,7 @@ class MVITriggerGUI(QMainWindow):
                     self.config["topics"].append(new_topic)
                     self.save_config()
                     self.update_topic_list()
+                    self.update_checkbox_list()
                     self.topic_combo.setCurrentText(new_topic)
                     self.statusBar.showMessage(f"เพิ่ม topic: {new_topic}", 3000)
                 else:
@@ -407,6 +621,7 @@ class MVITriggerGUI(QMainWindow):
                 self.config["topics"].remove(current_topic)
                 self.save_config()
                 self.update_topic_list()
+                self.update_checkbox_list()
                 self.statusBar.showMessage(f"ลบ topic: {current_topic}", 3000)
 
     def init_mqtt(self):
@@ -471,6 +686,27 @@ class MVITriggerGUI(QMainWindow):
             print(json.dumps(data, indent=2, ensure_ascii=False))
             print("="*60 + "\n")
 
+            # Track response for multi-topic trigger
+            # Convert result topic (mvi/model1/result) to trigger topic (mvi/model1/trigger)
+            trigger_topic = topic.replace("/result", "/trigger")
+
+            if trigger_topic in self.pending_topics:
+                # Remove from pending and store response
+                self.pending_topics.discard(trigger_topic)
+                result_value = self.extract_result_value(data)
+                self.pending_responses[trigger_topic] = {
+                    "status": "received",
+                    "result": result_value,
+                    "data": data
+                }
+                print(f"✓ Result received from {trigger_topic}: {result_value}")
+
+                # Check if all responses received
+                if len(self.pending_topics) == 0:
+                    print("✓ All responses received!")
+                    self.trigger_timer.stop()
+                    self.reset_trigger_button()
+
             # Extract and display image (metadata and status will be updated inside display_image)
             self.display_image(data)
 
@@ -479,15 +715,45 @@ class MVITriggerGUI(QMainWindow):
             print(f"⚠️ Non-JSON message: {payload}")
             self.statusBar.showMessage(f"ได้รับข้อความจาก {topic}", 3000)
 
-    def trigger_inspection(self):
-        """Trigger MVI inspection"""
-        current_topic = self.topic_combo.currentText()
-        if not current_topic:
-            QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
-            return
+    def extract_result_value(self, data):
+        """Extract result value from MVI response data"""
+        # Try to find result field (case-insensitive)
+        for key in data.keys():
+            if key.lower() == "result":
+                return data[key].lower() if isinstance(data[key], str) else "unknown"
+        return "unknown"
 
-        # Change button text to "กำลังตรวจสอบ"
-        self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
+    def trigger_inspection(self):
+        """Trigger MVI inspection (single or multiple topics)"""
+        topics_to_trigger = []
+
+        # Determine which topics to trigger based on mode
+        if self.single_mode_radio.isChecked():
+            # Single topic mode
+            current_topic = self.topic_combo.currentText()
+            if not current_topic:
+                QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
+                return
+            topics_to_trigger = [current_topic]
+        else:
+            # Multiple topics mode
+            for checkbox in self.topic_checkboxes:
+                if checkbox.isChecked():
+                    topics_to_trigger.append(checkbox.text())
+
+            if len(topics_to_trigger) == 0:
+                QMessageBox.warning(self, "Warning", "กรุณาเลือกอย่างน้อย 1 topic")
+                return
+
+        # Initialize pending topics tracking
+        self.pending_topics = set(topics_to_trigger)
+        self.pending_responses = {}
+
+        # Update button text
+        if len(topics_to_trigger) == 1:
+            self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
+        else:
+            self.trigger_btn.setText(f"⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)")
         self.trigger_btn.setEnabled(False)  # Disable during inspection
 
         # Start timeout timer (30 seconds)
@@ -495,20 +761,38 @@ class MVITriggerGUI(QMainWindow):
 
         # Prepare trigger message
         trigger_msg = {
-            "action": "trigger",
-            "timestamp": QTimer().singleShot(0, lambda: None)  # Current time
+            "action": "trigger"
         }
 
-        # Publish trigger
-        success = self.mqtt_client.publish(current_topic, trigger_msg)
-        if success:
-            self.statusBar.showMessage(f"ส่ง trigger ไปยัง {current_topic}", 3000)
+        # Publish trigger to all selected topics
+        success_count = 0
+        for topic in topics_to_trigger:
+            success = self.mqtt_client.publish(topic, trigger_msg)
+            if success:
+                success_count += 1
+                print(f"📤 Trigger sent to: {topic}")
+            else:
+                print(f"❌ Failed to send trigger to: {topic}")
+                # Remove from pending if failed to send
+                self.pending_topics.discard(topic)
+
+        # Show status message
+        if success_count > 0:
+            if len(topics_to_trigger) == 1:
+                self.statusBar.showMessage(f"ส่ง trigger ไปยัง {topics_to_trigger[0]}", 3000)
+            else:
+                self.statusBar.showMessage(
+                    f"ส่ง trigger ไปยัง {success_count}/{len(topics_to_trigger)} topics",
+                    3000
+                )
         else:
             QMessageBox.warning(self, "Error", "ไม่สามารถส่ง trigger ได้")
-            # Reset button if failed
+            # Reset button if all failed
             self.trigger_timer.stop()
             self.trigger_btn.setText("🔘 TRIGGER")
             self.trigger_btn.setEnabled(True)
+            self.pending_topics.clear()
+            self.pending_responses.clear()
 
     def update_camera_status(self, camera_id, data):
         """Update status label for specific camera based on Overall Result"""
@@ -591,25 +875,78 @@ class MVITriggerGUI(QMainWindow):
         print("⏱️ Trigger timeout - no response received within 30 seconds")
         self.trigger_btn.setText("🔘 TRIGGER")
         self.trigger_btn.setEnabled(True)
-        self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
 
-        # Show popup with troubleshooting guide
+        # Calculate received and missing counts
+        received_count = len(self.pending_responses)
+        missing_count = len(self.pending_topics)
+        total_count = received_count + missing_count
+
+        # Update status bar
+        if missing_count > 0:
+            self.statusBar.showMessage(
+                f"⚠️ Timeout: ได้รับผล {received_count}/{total_count} topics",
+                5000
+            )
+        else:
+            self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
+
+        # Show detailed popup if there were any triggers
+        if total_count > 0:
+            self.show_timeout_details_popup()
+
+        # Clear pending state
+        self.pending_topics.clear()
+        self.pending_responses.clear()
+
+    def show_timeout_details_popup(self):
+        """Show detailed timeout popup with received/missing topics"""
+        received_count = len(self.pending_responses)
+        missing_count = len(self.pending_topics)
+        total_count = received_count + missing_count
+
+        # Create message box
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Icon.Warning)
         msg_box.setWindowTitle("⚠️ Trigger Timeout")
-        msg_box.setText("ไม่ได้รับผลการตรวจสอบภายใน 30 วินาที")
-        msg_box.setInformativeText(
-            "กรุณาตรวจสอบสาเหตุที่อาจทำให้เกิดปัญหา:\n\n"
+
+        if missing_count == 0:
+            msg_box.setText("ไม่ได้รับผลการตรวจสอบภายใน 30 วินาที")
+        else:
+            msg_box.setText(f"ได้รับผลลัพธ์: {received_count}/{total_count} topics")
+
+        # Build details message
+        details = ""
+
+        # Topics that received results
+        if len(self.pending_responses) > 0:
+            details += "✓ ได้รับผลลัพธ์:\n"
+            for topic, response in sorted(self.pending_responses.items()):
+                result = response["result"].upper()
+                icon = "✓" if result == "PASS" else "✗"
+                details += f"  {icon} {topic} - [{result}]\n"
+            details += "\n"
+
+        # Topics that didn't receive results (timeout)
+        if len(self.pending_topics) > 0:
+            details += "✗ ไม่ได้รับผลลัพธ์ (Timeout):\n"
+            for topic in sorted(self.pending_topics):
+                details += f"  ⏱ {topic}\n"
+            details += "\n"
+
+        # Troubleshooting guide
+        details += (
+            "กรุณาตรวจสอบ topics ที่ไม่ได้รับผล:\n\n"
             "1. ตรวจสอบการเชื่อมต่อ MQTT\n"
-            "   - ตรวจสอบว่า MQTT Broker ทำงานอยู่หรือไม่\n"
-            "   - ตรวจสอบ IP Address และ Port ใน config.json\n\n"
-            "2. ตรวจสอบ Login เข้าหน้าเว็บ Maximo Visual Inspection Edge\n"
-            "   - ตรวจสอบว่า Login เข้าระบบได้หรือไม่\n"
-            "   - ตรวจสอบ Session ยังคงใช้งานได้อยู่\n\n"
-            "3. ตรวจสอบสถานะ Enabled Inspection Status\n"
-            "   - ตรวจสอบว่า Inspection ถูกเปิดใช้งานในระบบ MVI Edge\n"
-            "   - ตรวจสอบว่า Model พร้อมใช้งานและไม่มี Error"
+            "   - MQTT Broker ทำงานอยู่หรือไม่\n"
+            "   - IP Address และ Port ใน config.json\n\n"
+            "2. ตรวจสอบ Login เข้า MVI Edge\n"
+            "   - Session ยังคงใช้งานได้อยู่\n\n"
+            "3. ตรวจสอบ Inspection Status\n"
+            "   - Inspection เปิดใช้งานใน MVI Edge\n"
+            "   - Model พร้อมใช้งาน"
         )
+
+        msg_box.setInformativeText(details)
         msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg_box.exec()
 

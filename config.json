@@ -10,5 +10,10 @@
     "mvi/model1/trigger",
     "mvi/model2/trigger"
   ],
-  "subscribe_topic": "mvi/+/result"
+  "subscribe_topic": "mvi/+/result",
+  "ui_state": {
+    "trigger_mode": "single",
+    "last_single_topic": "mvi/model1/trigger",
+    "selected_topics": []
+  }
 }
