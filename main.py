@@ -695,26 +695,42 @@ class MVITriggerGUI(QMainWindow):
             self.display_image(data)
 
             # Track response for multi-topic trigger (AFTER displaying)
-            # Convert result topic to trigger topic if needed
-            # Support both formats: "xxx/result" → "xxx/trigger" and "xxx" → "xxx"
-            trigger_topic = topic.replace("/result", "/trigger") if "/result" in topic else topic
+            # Use flexible response counting instead of strict topic matching
+            if hasattr(self, 'expected_response_count') and self.expected_response_count > 0:
+                # Check if this is a valid inspection result (not external noise)
+                is_valid_result = False
+                device_id = data.get("Device ID", "")
 
-            if trigger_topic in self.pending_topics:
-                # Remove from pending and store response
-                self.pending_topics.discard(trigger_topic)
-                result_value = self.extract_result_value(data)
-                self.pending_responses[trigger_topic] = {
-                    "status": "received",
-                    "result": result_value,
-                    "data": data
-                }
-                print(f"✓ Result received from {trigger_topic}: {result_value}")
+                # Valid result criteria:
+                # 1. Has "Overall Result" field
+                # 2. Either has Device ID or Image Path (not empty messages)
+                if "Overall Result" in data:
+                    if device_id or data.get("Image Path") or data.get("Image ID"):
+                        is_valid_result = True
 
-                # Check if all responses received
-                if len(self.pending_topics) == 0:
-                    print("✓ All responses received!")
-                    self.trigger_timer.stop()
-                    self.reset_trigger_button()  # Reset button after all responses received
+                        # Check if this device already responded (avoid counting duplicates)
+                        if device_id and device_id in self.devices_received_in_session:
+                            is_valid_result = False
+                            print(f"ℹ️ Duplicate response from device {device_id}, ignoring")
+                        elif device_id:
+                            self.devices_received_in_session.add(device_id)
+
+                if is_valid_result:
+                    self.received_response_count += 1
+                    result_value = self.extract_result_value(data)
+
+                    print(f"✓ Valid inspection result received from {topic}")
+                    print(f"  Device: {device_id or 'unknown'}")
+                    print(f"  Result: {result_value}")
+                    print(f"  Progress: {self.received_response_count}/{self.expected_response_count}")
+
+                    # Check if all expected responses received
+                    if self.received_response_count >= self.expected_response_count:
+                        print("✓ All expected responses received!")
+                        self.trigger_timer.stop()
+                        self.reset_trigger_button()
+                else:
+                    print(f"ℹ️ Message from {topic} doesn't match valid result criteria (likely external message or duplicate)")
 
         except json.JSONDecodeError:
             # Not JSON, just log it
@@ -754,6 +770,11 @@ class MVITriggerGUI(QMainWindow):
         # Initialize pending topics tracking
         self.pending_topics = set(topics_to_trigger)
         self.pending_responses = {}
+
+        # Track expected response count for flexible topic matching
+        self.expected_response_count = len(topics_to_trigger)
+        self.received_response_count = 0
+        self.devices_received_in_session = set()  # Track unique devices received
 
         # Track which cameras have received data in this trigger session
         # This helps with proper camera assignment in multi-topic mode
@@ -873,82 +894,92 @@ class MVITriggerGUI(QMainWindow):
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
-        print(f"🔄 reset_trigger_button() called, pending_topics={len(self.pending_topics)}")
-
-        # Check if we're still waiting for responses in multi-topic mode
-        if len(self.pending_topics) > 0:
-            print(f"⏳ Still waiting for {len(self.pending_topics)} topic(s)... NOT resetting button")
-            return  # Don't reset yet, still waiting
-
         # Stop timeout timer if running
         if self.trigger_timer.isActive():
             self.trigger_timer.stop()
 
         self.trigger_btn.setText("🔘 TRIGGER")
         self.trigger_btn.setEnabled(True)
-        print("🔄 Trigger button reset to '🔘 TRIGGER' and enabled")
+
+        # Clear tracking variables
+        if hasattr(self, 'cameras_updated_in_session'):
+            self.cameras_updated_in_session.clear()
+        if hasattr(self, 'devices_received_in_session'):
+            self.devices_received_in_session.clear()
+        if hasattr(self, 'expected_response_count'):
+            self.expected_response_count = 0
+            self.received_response_count = 0
+
+        print("🔄 Trigger button reset and session tracking cleared")
 
     def on_trigger_timeout(self):
         """Handle trigger timeout (no response received)"""
-        print("⏱️ Trigger timeout - no response received within 30 seconds")
-        self.trigger_btn.setText("🔘 TRIGGER")
-        self.trigger_btn.setEnabled(True)
+        # Get response counts
+        expected = getattr(self, 'expected_response_count', 0)
+        received = getattr(self, 'received_response_count', 0)
 
-        # Calculate received and missing counts
-        received_count = len(self.pending_responses)
-        missing_count = len(self.pending_topics)
-        total_count = received_count + missing_count
+        print(f"⏱️ Trigger timeout - Received {received}/{expected} responses")
 
-        # Update status bar
-        if missing_count > 0:
-            self.statusBar.showMessage(
-                f"⚠️ Timeout: ได้รับผล {received_count}/{total_count} topics",
-                5000
-            )
+        # Only show timeout if we didn't receive enough responses
+        if received < expected:
+            self.trigger_btn.setText("🔘 TRIGGER")
+            self.trigger_btn.setEnabled(True)
+
+            # Update status bar
+            if received > 0:
+                self.statusBar.showMessage(
+                    f"⚠️ Timeout: ได้รับผล {received}/{expected} responses",
+                    5000
+                )
+            else:
+                self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
+
+            # Show detailed popup if there were any triggers
+            if expected > 0:
+                self.show_timeout_details_popup()
+
+            # Clear pending state
+            if hasattr(self, 'pending_topics'):
+                self.pending_topics.clear()
+            if hasattr(self, 'pending_responses'):
+                self.pending_responses.clear()
+            if hasattr(self, 'devices_received_in_session'):
+                self.devices_received_in_session.clear()
+            self.expected_response_count = 0
+            self.received_response_count = 0
         else:
-            self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
-
-        # Show detailed popup if there were any triggers
-        if total_count > 0:
-            self.show_timeout_details_popup()
-
-        # Clear pending state
-        self.pending_topics.clear()
-        self.pending_responses.clear()
+            print("✓ All responses already received, ignoring timeout")
 
     def show_timeout_details_popup(self):
         """Show detailed timeout popup with received/missing topics"""
-        received_count = len(self.pending_responses)
-        missing_count = len(self.pending_topics)
-        total_count = received_count + missing_count
+        expected = getattr(self, 'expected_response_count', 0)
+        received = getattr(self, 'received_response_count', 0)
+        missing = expected - received
 
         # Create message box
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Icon.Warning)
         msg_box.setWindowTitle("⚠️ Trigger Timeout")
 
-        if missing_count == 0:
+        if received == 0:
             msg_box.setText("ไม่ได้รับผลการตรวจสอบภายใน 30 วินาที")
         else:
-            msg_box.setText(f"ได้รับผลลัพธ์: {received_count}/{total_count} topics")
+            msg_box.setText(f"ได้รับผลลัพธ์: {received}/{expected} topics")
 
         # Build details message
         details = ""
 
-        # Topics that received results
-        if len(self.pending_responses) > 0:
-            details += "✓ ได้รับผลลัพธ์:\n"
-            for topic, response in sorted(self.pending_responses.items()):
-                result = response["result"].upper()
-                icon = "✓" if result == "PASS" else "✗"
-                details += f"  {icon} {topic} - [{result}]\n"
-            details += "\n"
+        # Show what we got
+        if received > 0:
+            details += f"✓ ได้รับผลลัพธ์: {received} response(s)\n\n"
 
-        # Topics that didn't receive results (timeout)
-        if len(self.pending_topics) > 0:
-            details += "✗ ไม่ได้รับผลลัพธ์ (Timeout):\n"
-            for topic in sorted(self.pending_topics):
-                details += f"  ⏱ {topic}\n"
+        # Show what's missing
+        if missing > 0:
+            details += f"✗ ไม่ได้รับผลลัพธ์ (Timeout): {missing} response(s)\n"
+            if hasattr(self, 'pending_topics') and len(self.pending_topics) > 0:
+                details += "Topics ที่รอ:\n"
+                for topic in sorted(self.pending_topics):
+                    details += f"  ⏱ {topic}\n"
             details += "\n"
 
         # Troubleshooting guide
