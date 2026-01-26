@@ -679,6 +679,11 @@ class MVITriggerGUI(QMainWindow):
             # Try to parse JSON
             data = json.loads(payload)
 
+            # IGNORE trigger messages (echo from our own trigger commands)
+            if "action" in data and data.get("action") == "trigger":
+                print(f"🔇 Ignoring trigger message echo from topic: {topic}")
+                return  # Don't process trigger messages
+
             # Debug: Print received JSON to console
             print("\n" + "="*60)
             print(f"📨 MQTT Message received from topic: {topic}")
