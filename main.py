@@ -824,8 +824,7 @@ class MVITriggerGUI(QMainWindow):
             )
             status_label.setVisible(True)
             print(f"✓ {camera_id.upper()}: PASS")
-            # Reset trigger button
-            self.reset_trigger_button()
+            # Don't reset button here - let on_mqtt_message() handle it when all topics received
         elif result == "fail":
             status_label.setText("✗ FAIL")
             status_label.setStyleSheet(
@@ -834,8 +833,7 @@ class MVITriggerGUI(QMainWindow):
             )
             status_label.setVisible(True)
             print(f"✗ {camera_id.upper()}: FAIL")
-            # Reset trigger button
-            self.reset_trigger_button()
+            # Don't reset button here - let on_mqtt_message() handle it when all topics received
         else:
             # Try case-insensitive search
             found = False
@@ -863,12 +861,10 @@ class MVITriggerGUI(QMainWindow):
                         found = True
                         break
 
-            # Reset trigger button whether result was found or not
-            # This prevents button from being stuck if no result field exists
-            self.reset_trigger_button()
-
+            # Don't reset button here - let on_mqtt_message() handle it when all topics received
+            # Button will be reset by on_mqtt_message() or on_trigger_timeout()
             if not found:
-                print(f"⚠️ {camera_id.upper()}: No result field found, but resetting trigger button")
+                print(f"⚠️ {camera_id.upper()}: No result field found")
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
