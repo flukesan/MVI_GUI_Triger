@@ -686,9 +686,13 @@ class MVITriggerGUI(QMainWindow):
             print(json.dumps(data, indent=2, ensure_ascii=False))
             print("="*60 + "\n")
 
-            # Track response for multi-topic trigger
-            # Convert result topic (mvi/model1/result) to trigger topic (mvi/model1/trigger)
-            trigger_topic = topic.replace("/result", "/trigger")
+            # Extract and display image FIRST (metadata and status will be updated inside display_image)
+            self.display_image(data)
+
+            # Track response for multi-topic trigger (AFTER displaying)
+            # Convert result topic to trigger topic if needed
+            # Support both formats: "xxx/result" → "xxx/trigger" and "xxx" → "xxx"
+            trigger_topic = topic.replace("/result", "/trigger") if "/result" in topic else topic
 
             if trigger_topic in self.pending_topics:
                 # Remove from pending and store response
@@ -705,10 +709,7 @@ class MVITriggerGUI(QMainWindow):
                 if len(self.pending_topics) == 0:
                     print("✓ All responses received!")
                     self.trigger_timer.stop()
-                    self.reset_trigger_button()
-
-            # Extract and display image (metadata and status will be updated inside display_image)
-            self.display_image(data)
+                    self.reset_trigger_button()  # Reset button after all responses received
 
         except json.JSONDecodeError:
             # Not JSON, just log it
@@ -756,12 +757,17 @@ class MVITriggerGUI(QMainWindow):
         # Update button text
         if len(topics_to_trigger) == 1:
             self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
+            print(f"🔘 Button text set to: '⏳ กำลังตรวจสอบ'")
         else:
             self.trigger_btn.setText(f"⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)")
+            print(f"🔘 Button text set to: '⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)'")
+
         self.trigger_btn.setEnabled(False)  # Disable during inspection
+        print(f"🔘 Button disabled: {not self.trigger_btn.isEnabled()}")
 
         # Start timeout timer (30 seconds)
         self.trigger_timer.start(30000)  # 30000ms = 30 seconds
+        print(f"⏱️ Timeout timer started: 30 seconds")
 
         # Prepare trigger message
         trigger_msg = {
@@ -866,6 +872,8 @@ class MVITriggerGUI(QMainWindow):
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
+        print(f"🔄 reset_trigger_button() called, pending_topics={len(self.pending_topics)}")
+
         # Check if we're still waiting for responses in multi-topic mode
         if len(self.pending_topics) > 0:
             print(f"⏳ Still waiting for {len(self.pending_topics)} topic(s)... NOT resetting button")
@@ -877,11 +885,7 @@ class MVITriggerGUI(QMainWindow):
 
         self.trigger_btn.setText("🔘 TRIGGER")
         self.trigger_btn.setEnabled(True)
-
-        # Clear camera update tracking for next trigger session
-        if hasattr(self, 'cameras_updated_in_session'):
-            self.cameras_updated_in_session.clear()
-            print("🔄 Trigger button reset and camera tracking cleared")
+        print("🔄 Trigger button reset to '🔘 TRIGGER' and enabled")
 
     def on_trigger_timeout(self):
         """Handle trigger timeout (no response received)"""
@@ -1096,10 +1100,10 @@ class MVITriggerGUI(QMainWindow):
                 camera_id = "cam2"
                 self.cam2_device_id = device_id
             else:
-                # Both cameras occupied with different Device IDs
-                # Show temporarily on cam1 but DON'T override device_id assignment
+                # Both cameras occupied, show on cam1 temporarily but DON'T override device_id
+                # This allows seeing new device data without losing existing camera assignments
                 camera_id = "cam1"
-                print(f"⚠️ Both cameras occupied. Showing {device_id} on cam1 temporarily (preserving cam1 assignment to {self.cam1_device_id})")
+                print(f"⚠️ Both cameras occupied. Showing {device_id} on cam1 temporarily (cam1 still assigned to {self.cam1_device_id})")
         else:
             # No device ID provided - use order of reception for multi-topic mode
             # Check which camera has been updated in this trigger session
