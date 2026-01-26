@@ -749,6 +749,10 @@ class MVITriggerGUI(QMainWindow):
         self.pending_topics = set(topics_to_trigger)
         self.pending_responses = {}
 
+        # Track which cameras have received data in this trigger session
+        # This helps with proper camera assignment in multi-topic mode
+        self.cameras_updated_in_session = set()
+
         # Update button text
         if len(topics_to_trigger) == 1:
             self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
@@ -862,13 +866,22 @@ class MVITriggerGUI(QMainWindow):
 
     def reset_trigger_button(self):
         """Reset trigger button to default state"""
+        # Check if we're still waiting for responses in multi-topic mode
+        if len(self.pending_topics) > 0:
+            print(f"⏳ Still waiting for {len(self.pending_topics)} topic(s)... NOT resetting button")
+            return  # Don't reset yet, still waiting
+
         # Stop timeout timer if running
         if self.trigger_timer.isActive():
             self.trigger_timer.stop()
 
         self.trigger_btn.setText("🔘 TRIGGER")
         self.trigger_btn.setEnabled(True)
-        print("🔄 Trigger button reset")
+
+        # Clear camera update tracking for next trigger session
+        if hasattr(self, 'cameras_updated_in_session'):
+            self.cameras_updated_in_session.clear()
+            print("🔄 Trigger button reset and camera tracking cleared")
 
     def on_trigger_timeout(self):
         """Handle trigger timeout (no response received)"""
@@ -1083,12 +1096,27 @@ class MVITriggerGUI(QMainWindow):
                 camera_id = "cam2"
                 self.cam2_device_id = device_id
             else:
-                # Both cameras occupied, use camera 1 as default
+                # Both cameras occupied with different Device IDs
+                # Show temporarily on cam1 but DON'T override device_id assignment
                 camera_id = "cam1"
-                self.cam1_device_id = device_id
+                print(f"⚠️ Both cameras occupied. Showing {device_id} on cam1 temporarily (preserving cam1 assignment to {self.cam1_device_id})")
         else:
-            # No device ID provided, use camera 1 as default
-            camera_id = "cam1"
+            # No device ID provided - use order of reception for multi-topic mode
+            # Check which camera has been updated in this trigger session
+            if hasattr(self, 'cameras_updated_in_session'):
+                if "cam1" not in self.cameras_updated_in_session:
+                    # Camera 1 hasn't been updated in this session, use it
+                    camera_id = "cam1"
+                elif "cam2" not in self.cameras_updated_in_session:
+                    # Camera 1 updated, Camera 2 not yet, use Camera 2
+                    camera_id = "cam2"
+                else:
+                    # Both cameras updated in this session, use cam1
+                    camera_id = "cam1"
+                    print("⚠️ Both cameras already updated in this session. Showing new result on cam1.")
+            else:
+                # Fallback to cam1 if tracking variable doesn't exist
+                camera_id = "cam1"
 
         print(f"📷 Displaying on {camera_id.upper()}: Device={device_id}, Image={image_id}")
 
@@ -1123,6 +1151,11 @@ class MVITriggerGUI(QMainWindow):
 
         # Track latest camera
         self.latest_camera = camera_id
+
+        # Track which camera was updated in this trigger session (for multi-topic mode)
+        if hasattr(self, 'cameras_updated_in_session'):
+            self.cameras_updated_in_session.add(camera_id)
+            print(f"📝 Camera {camera_id} marked as updated. Session cameras: {self.cameras_updated_in_session}")
 
         # Save to history (will save after image is loaded)
         image_pixmap_for_history = None
