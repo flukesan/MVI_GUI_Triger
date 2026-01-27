@@ -684,21 +684,16 @@ class MVITriggerGUI(QMainWindow):
                 print(f"🔇 Ignoring trigger message echo from topic: {topic}")
                 return  # Don't process trigger messages
 
-            # Check if we're in an active trigger session
-            in_trigger_session = hasattr(self, 'expected_response_count') and self.expected_response_count > 0
+            # FILTER incomplete messages (always, regardless of session state)
+            # Check if message has minimum required identification data
+            has_device_id = bool(data.get("Device ID", "").strip())
+            has_image_path = bool(data.get("Image Path", "").strip())
+            has_image_id = bool(data.get("Image ID", "").strip())
 
-            # If NOT in trigger session, filter out incomplete/invalid messages
-            if not in_trigger_session:
-                # Check if message has minimum required data
-                has_device_id = bool(data.get("Device ID", "").strip())
-                has_image_path = bool(data.get("Image Path", "").strip())
-                has_image_id = bool(data.get("Image ID", "").strip())
-                has_overall_result = "Overall Result" in data
-
-                # Ignore messages without essential data when not in trigger session
-                if not (has_device_id or has_image_path or has_image_id):
-                    print(f"🔇 Ignoring incomplete message from {topic} (no Device ID, Image Path, or Image ID)")
-                    return
+            # Ignore messages without ANY essential identification data
+            if not (has_device_id or has_image_path or has_image_id):
+                print(f"🔇 Ignoring incomplete message from {topic} (no Device ID, Image Path, or Image ID)")
+                return
 
             # Debug: Print received JSON to console
             print("\n" + "="*60)
