@@ -142,8 +142,8 @@ Database Schema:
                     COUNT(*) as total,
                     SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END) as pass_count,
                     SUM(CASE WHEN result = 'fail' THEN 1 ELSE 0 END) as fail_count
-                FROM history
-                WHERE date = ?
+                FROM inspections
+                WHERE date(timestamp) = ?
             """, (date_filter,))
         elif period == "week":
             week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -152,8 +152,8 @@ Database Schema:
                     COUNT(*) as total,
                     SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END) as pass_count,
                     SUM(CASE WHEN result = 'fail' THEN 1 ELSE 0 END) as fail_count
-                FROM history
-                WHERE date >= ?
+                FROM inspections
+                WHERE date(timestamp) >= ?
             """, (week_ago,))
         else:
             cursor.execute("""
@@ -161,7 +161,7 @@ Database Schema:
                     COUNT(*) as total,
                     SUM(CASE WHEN result = 'pass' THEN 1 ELSE 0 END) as pass_count,
                     SUM(CASE WHEN result = 'fail' THEN 1 ELSE 0 END) as fail_count
-                FROM history
+                FROM inspections
             """)
 
         result = cursor.fetchone()
@@ -174,12 +174,12 @@ Database Schema:
 
     def get_top_defects(self, limit=5):
         """Get most common defects (placeholder - needs defect tracking)"""
-        # This would require parsing Rule Results from history
+        # This would require parsing Rule Results from inspections
         # For now, return device statistics
         cursor = self.db.cursor()
         cursor.execute("""
             SELECT device_id, result, COUNT(*) as count
-            FROM history
+            FROM inspections
             WHERE device_id != ''
             GROUP BY device_id, result
             ORDER BY count DESC
