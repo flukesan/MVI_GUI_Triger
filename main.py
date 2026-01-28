@@ -106,9 +106,11 @@ class MVITriggerGUI(QMainWindow):
         self.init_mqtt()
 
         # Initialize database agent after history_manager
-        if AI_AVAILABLE and self.ai_agent and hasattr(self.history_manager, 'db_connection'):
+        if AI_AVAILABLE and self.ai_agent and hasattr(self.history_manager, 'db_path'):
             try:
-                self.db_agent = DatabaseAgent(self.ai_agent, self.history_manager.db_connection)
+                import sqlite3
+                db_connection = sqlite3.connect(self.history_manager.db_path)
+                self.db_agent = DatabaseAgent(self.ai_agent, db_connection)
                 print("✓ Database agent initialized")
             except Exception as e:
                 print(f"⚠️ Failed to initialize database agent: {e}")
