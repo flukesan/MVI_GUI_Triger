@@ -40,13 +40,39 @@ class DatabaseAgent:
 
         return schema
 
+    def _get_sample_data(self, limit=3):
+        """Get sample data from database for AI context"""
+        try:
+            cursor = self.db.cursor()
+            cursor.execute("""
+                SELECT id, timestamp, device_id, result, station
+                FROM inspections
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (limit,))
+
+            columns = ['id', 'timestamp', 'device_id', 'result', 'station']
+            samples = []
+            for row in cursor.fetchall():
+                samples.append(dict(zip(columns, row)))
+
+            if samples:
+                return json.dumps(samples, ensure_ascii=False, indent=2)
+            else:
+                return "No data in database yet"
+        except:
+            return "No sample data available"
+
     def query_database_nl(self, natural_language_query):
         """Convert natural language → SQL → Execute → Return results"""
 
         # 1. Get database schema
         schema = self.get_database_schema()
 
-        # 2. Ask AI to generate SQL
+        # 2. Get sample data
+        sample_data = self._get_sample_data()
+
+        # 3. Ask AI to generate SQL
         prompt = f"""คุณเป็น SQL Expert. แปลงคำถามต่อไปนี้เป็น SQLite query:
 
 คำถาม: {natural_language_query}
@@ -54,12 +80,28 @@ class DatabaseAgent:
 Database Schema:
 {schema}
 
-กฎ:
+ตัวอย่างข้อมูล:
+{sample_data}
+
+กฎสำคัญ:
 - ใช้ SQLite syntax
-- ตอบเฉพาะ SQL query เท่านั้น ห้ามมีข้อความอื่น
-- ห้ามใส่ ```sql หรือ markdown formatting
-- ถ้าต้องการวันที่ ใช้ strftime และ date('now')
-- ใช้ LIMIT ถ้าข้อมูลเยอะ
+- **ต้อง SELECT columns ที่เกี่ยวข้อง ไม่ใช่แค่ COUNT(*)**
+- เมื่อถามเกี่ยวกับรายละเอียด ต้อง SELECT: id, timestamp, device_id, result, station
+- เรียงลำดับด้วย ORDER BY timestamp DESC
+- ใช้ LIMIT (max 20) เพื่อไม่ให้ข้อมูลเยอะเกิน
+- วันที่: ใช้ date(timestamp) = date('now') สำหรับวันนี้
+- ตอบเฉพาะ SQL query เท่านั้น ห้ามอธิบาย
+- ห้ามใส่ ```sql หรือ markdown
+
+ตัวอย่าง:
+คำถาม: "มีการตรวจสอบกี่ครั้งวันนี้"
+SQL: SELECT COUNT(*) FROM inspections WHERE date(timestamp) = date('now')
+
+คำถาม: "แสดงรายละเอียดการตรวจสอบวันนี้"
+SQL: SELECT id, timestamp, device_id, result, station FROM inspections WHERE date(timestamp) = date('now') ORDER BY timestamp DESC LIMIT 10
+
+คำถาม: "อันแรก" หรือ "ล่าสุด"
+SQL: SELECT id, timestamp, device_id, result, station FROM inspections ORDER BY timestamp DESC LIMIT 1
 
 SQL query:"""
 
@@ -188,20 +230,55 @@ Database Schema:
 
         return cursor.fetchall()
 
+    def get_recent_inspections(self, limit=10, period="today"):
+        """Get recent inspections with full details"""
+        cursor = self.db.cursor()
+
+        if period == "today":
+            date_filter = datetime.now().strftime("%Y-%m-%d")
+            cursor.execute("""
+                SELECT id, timestamp, device_id, image_id, result, station
+                FROM inspections
+                WHERE date(timestamp) = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (date_filter, limit))
+        else:
+            cursor.execute("""
+                SELECT id, timestamp, device_id, image_id, result, station
+                FROM inspections
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (limit,))
+
+        columns = ['id', 'timestamp', 'device_id', 'image_id', 'result', 'station']
+        results = []
+        for row in cursor.fetchall():
+            results.append(dict(zip(columns, row)))
+
+        return results
+
     def analyze_with_ai(self, query_type="summary"):
         """Get AI analysis of database data"""
         if query_type == "summary":
             stats = self.get_statistics("today")
+            recent = self.get_recent_inspections(limit=10, period="today")
+
             prompt = f"""วิเคราะห์สถิติการตรวจสอบวันนี้:
 
+สถิติรวม:
 {json.dumps(stats, ensure_ascii=False, indent=2)}
 
-โปรดให้:
-1. สรุปภาพรวม
-2. ประเมินสถานการณ์ (ดี/ปานกลาง/ต้องปรับปรุง)
-3. ข้อเสนอแนะ
+รายละเอียดการตรวจสอบล่าสุด ({len(recent)} รายการ):
+{json.dumps(recent, ensure_ascii=False, indent=2)}
 
-ใช้ emoji และจัดรูปแบบให้อ่านง่าย:"""
+โปรดให้:
+1. สรุปภาพรวม (จำนวน pass/fail, pass rate)
+2. รายละเอียดการตรวจสอบแต่ละครั้ง (เวลา, device, ผล)
+3. ประเมินสถานการณ์ (ดี/ปานกลาง/ต้องปรับปรุง)
+4. ข้อเสนอแนะ
+
+ใช้ emoji และจัดรูปแบบให้อ่านง่าย แสดงเวลาและ device ให้ชัดเจน:"""
 
             return self.ai_agent.chat(prompt)
 
