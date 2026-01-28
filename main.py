@@ -1677,11 +1677,21 @@ class MVITriggerGUI(QMainWindow):
 
         # Process in background (simple approach - could use QThread for better UX)
         try:
+            # Check if need database query
+            db_keywords = ["ตรวจสอบ", "inspection", "รายละเอียด", "detail", "เมื่อไหร่", "when", "กี่ครั้ง", "how many",
+                          "fail", "pass", "วันนี้", "today", "เครื่อง", "device", "ล่าสุด", "latest", "recent",
+                          "แสดง", "show", "list", "จำนวน", "count", "สถิติ", "stat", "วิเคราะห์", "analyze"]
+            use_db = any(keyword in user_msg.lower() for keyword in db_keywords)
+
             # Check if need document search
             doc_keywords = ["คู่มือ", "manual", "วิธี", "how", "ขั้นตอน", "อธิบาย", "เอกสาร", "document"]
             use_rag = any(keyword in user_msg.lower() for keyword in doc_keywords)
 
-            if use_rag and self.doc_rag and self.doc_rag.get_document_count() > 0:
+            if use_db and self.db_agent:
+                # Use database agent for queries about inspections
+                response = self.db_agent.query_database_nl(user_msg)
+            elif use_rag and self.doc_rag and self.doc_rag.get_document_count() > 0:
+                # Use document RAG for manual/documentation questions
                 response = self.doc_rag.ask_with_rag(user_msg)
             else:
                 # Normal chat with context
