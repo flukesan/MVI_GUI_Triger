@@ -33,6 +33,16 @@ from mqtt_client import MQTTClient
 from history_manager import HistoryManager
 from history_widget import HistoryWidget
 
+# AI modules (optional - graceful degradation if not available)
+try:
+    from ai_agent import AIAgent
+    from document_rag import DocumentRAG
+    from database_agent import DatabaseAgent
+    AI_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ AI modules not available: {e}")
+    AI_AVAILABLE = False
+
 
 class AddTopicDialog(QDialog):
     """Dialog for adding new MQTT topic"""
@@ -77,9 +87,33 @@ class MVITriggerGUI(QMainWindow):
         self.config = self.load_config()
         self.mqtt_client = None
         self.history_manager = HistoryManager()  # Initialize history manager
+
+        # Initialize AI components (if available)
+        self.ai_agent = None
+        self.doc_rag = None
+        self.db_agent = None
+        if AI_AVAILABLE:
+            try:
+                self.ai_agent = AIAgent()
+                self.doc_rag = DocumentRAG(self.ai_agent, documents_folder="manuals")
+                # database_agent will be initialized after history_manager
+                print("✓ AI modules initialized")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize AI: {e}")
+
         self.init_ui()
         self.load_ui_state()  # Load saved UI state (mode and selections)
         self.init_mqtt()
+
+        # Initialize database agent after history_manager
+        if AI_AVAILABLE and self.ai_agent and hasattr(self.history_manager, 'db_path'):
+            try:
+                import sqlite3
+                db_connection = sqlite3.connect(self.history_manager.db_path)
+                self.db_agent = DatabaseAgent(self.ai_agent, db_connection)
+                print("✓ Database agent initialized")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize database agent: {e}")
 
     def load_config(self):
         """Load configuration from JSON file"""
@@ -194,6 +228,12 @@ class MVITriggerGUI(QMainWindow):
         # Create History tab
         self.history_widget = HistoryWidget()
         self.tabs.addTab(self.history_widget, "📋 History")
+
+        # Create AI Assistant tab (if available)
+        if AI_AVAILABLE and self.ai_agent:
+            self.ai_widget = QWidget()
+            self.init_ai_tab()
+            self.tabs.addTab(self.ai_widget, "🤖 AI Assistant")
 
         main_layout.addWidget(self.tabs)
 
@@ -1451,6 +1491,264 @@ class MVITriggerGUI(QMainWindow):
         if self.mqtt_client:
             self.mqtt_client.disconnect()
         event.accept()
+
+    def init_ai_tab(self):
+        """Initialize AI Assistant tab"""
+        layout = QVBoxLayout(self.ai_widget)
+
+        # Title
+        title = QLabel("🤖 AI Assistant (Powered by Ollama)")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+
+        # Status section
+        status_section = QGroupBox("📊 AI Status")
+        status_layout = QVBoxLayout()
+
+        # Connection status
+        if self.ai_agent and self.ai_agent.is_available():
+            status_label = QLabel("✅ Ollama Connected")
+            status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            status_label = QLabel("❌ Ollama Not Available")
+            status_label.setStyleSheet("color: red; font-weight: bold;")
+        status_layout.addWidget(status_label)
+
+        # Model selector
+        model_selector_layout = QHBoxLayout()
+        model_selector_layout.addWidget(QLabel("Current Model:"))
+
+        try:
+            from PyQt6.QtWidgets import QComboBox
+            self.model_combo = QComboBox()
+        except ImportError:
+            from PySide6.QtWidgets import QComboBox
+            self.model_combo = QComboBox()
+
+        if self.ai_agent:
+            for model in self.ai_agent.available_models:
+                family_icon = {"text": "💬", "vision": "👁️", "code": "💻"}.get(model["family"], "🤖")
+                self.model_combo.addItem(f"{family_icon} {model['name']}", model["name"])
+
+            # Set current model
+            for i in range(self.model_combo.count()):
+                if self.model_combo.itemData(i) == self.ai_agent.current_model:
+                    self.model_combo.setCurrentIndex(i)
+                    break
+
+            self.model_combo.currentIndexChanged.connect(self.on_ai_model_changed)
+
+        model_selector_layout.addWidget(self.model_combo)
+
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setMaximumWidth(40)
+        refresh_btn.setToolTip("Refresh models")
+        refresh_btn.clicked.connect(self.refresh_ai_models)
+        model_selector_layout.addWidget(refresh_btn)
+
+        status_layout.addLayout(model_selector_layout)
+
+        # Document count
+        if self.doc_rag:
+            doc_count_label = QLabel(f"📚 Documents: {self.doc_rag.get_document_count()} files")
+            status_layout.addWidget(doc_count_label)
+
+        status_section.setLayout(status_layout)
+        layout.addWidget(status_section)
+
+        # Chat display
+        chat_label = QLabel("💬 Chat")
+        chat_label.setStyleSheet("font-size: 14px; font-weight: bold; padding-top: 10px;")
+        layout.addWidget(chat_label)
+
+        try:
+            from PyQt6.QtWidgets import QTextEdit
+            self.chat_display = QTextEdit()
+        except ImportError:
+            from PySide6.QtWidgets import QTextEdit
+            self.chat_display = QTextEdit()
+
+        self.chat_display.setReadOnly(True)
+        self.chat_display.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 5px;
+                padding: 10px;
+                font-size: 13px;
+            }
+        """)
+        self.chat_display.setHtml("<i>พร้อมใช้งาน! พิมพ์คำถามหรือคำสั่งด้านล่าง</i>")
+        layout.addWidget(self.chat_display)
+
+        # Input area
+        input_layout = QHBoxLayout()
+
+        try:
+            from PyQt6.QtWidgets import QLineEdit
+            self.chat_input = QLineEdit()
+        except ImportError:
+            from PySide6.QtWidgets import QLineEdit
+            self.chat_input = QLineEdit()
+
+        self.chat_input.setPlaceholderText("พิมพ์คำถามหรือคำสั่ง... (Enter เพื่อส่ง)")
+        self.chat_input.setStyleSheet("padding: 8px; font-size: 13px;")
+        self.chat_input.returnPressed.connect(self.send_ai_message)
+        input_layout.addWidget(self.chat_input)
+
+        send_btn = QPushButton("📤 ส่ง")
+        send_btn.clicked.connect(self.send_ai_message)
+        input_layout.addWidget(send_btn)
+
+        layout.addLayout(input_layout)
+
+        # Quick action buttons
+        actions_label = QLabel("⚡ Quick Actions")
+        actions_label.setStyleSheet("font-size: 12px; font-weight: bold; padding-top: 5px;")
+        layout.addWidget(actions_label)
+
+        actions_layout = QHBoxLayout()
+
+        btn_analyze = QPushButton("📊 วิเคราะห์วันนี้")
+        btn_analyze.setToolTip("วิเคราะห์ผลการตรวจสอบวันนี้")
+        btn_analyze.clicked.connect(lambda: self.ai_quick_action("analyze_today"))
+        actions_layout.addWidget(btn_analyze)
+
+        btn_defects = QPushButton("🔍 Top Defects")
+        btn_defects.setToolTip("แสดง defects ที่พบบ่อยที่สุด")
+        btn_defects.clicked.connect(lambda: self.ai_quick_action("top_defects"))
+        actions_layout.addWidget(btn_defects)
+
+        btn_docs = QPushButton("📚 เอกสาร")
+        btn_docs.setToolTip("รายการเอกสารที่โหลดไว้")
+        btn_docs.clicked.connect(lambda: self.ai_quick_action("list_docs"))
+        actions_layout.addWidget(btn_docs)
+
+        btn_clear = QPushButton("🗑️ Clear")
+        btn_clear.setToolTip("ล้างประวัติการสนทนา")
+        btn_clear.clicked.connect(self.ai_clear_chat)
+        actions_layout.addWidget(btn_clear)
+
+        layout.addLayout(actions_layout)
+
+    def on_ai_model_changed(self, index):
+        """Handle AI model selection change"""
+        if not self.ai_agent:
+            return
+
+        model_name = self.model_combo.itemData(index)
+        if model_name and model_name != self.ai_agent.current_model:
+            success = self.ai_agent.set_model(model_name)
+            if success:
+                self.chat_display.append(f"<hr><i>✓ เปลี่ยนเป็น model: {model_name}</i><br>")
+                self.statusBar.showMessage(f"เปลี่ยนเป็น AI model: {model_name}", 3000)
+
+    def refresh_ai_models(self):
+        """Refresh AI model list"""
+        if not self.ai_agent:
+            return
+
+        self.ai_agent.refresh_available_models()
+        self.model_combo.clear()
+
+        for model in self.ai_agent.available_models:
+            family_icon = {"text": "💬", "vision": "👁️", "code": "💻"}.get(model["family"], "🤖")
+            self.model_combo.addItem(f"{family_icon} {model['name']}", model["name"])
+
+        self.statusBar.showMessage("อัพเดทรายการ AI models แล้ว", 3000)
+
+    def send_ai_message(self):
+        """Send message to AI"""
+        if not self.ai_agent:
+            self.chat_display.append("<b>❌ AI Agent ไม่พร้อมใช้งาน</b><br>")
+            return
+
+        user_msg = self.chat_input.text().strip()
+        if not user_msg:
+            return
+
+        # Display user message
+        self.chat_display.append(f"<b>👤 คุณ:</b> {user_msg}<br>")
+        self.chat_input.clear()
+
+        # Show thinking indicator
+        self.chat_display.append("<i>🤔 AI กำลังคิด...</i><br>")
+        self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+
+        # Process in background (simple approach - could use QThread for better UX)
+        try:
+            # Check if need database query
+            db_keywords = ["ตรวจสอบ", "inspection", "รายละเอียด", "detail", "เมื่อไหร่", "when", "กี่ครั้ง", "how many",
+                          "fail", "pass", "วันนี้", "today", "เครื่อง", "device", "ล่าสุด", "latest", "recent",
+                          "แสดง", "show", "list", "จำนวน", "count", "สถิติ", "stat", "วิเคราะห์", "analyze"]
+            use_db = any(keyword in user_msg.lower() for keyword in db_keywords)
+
+            # Check if need document search
+            doc_keywords = ["คู่มือ", "manual", "วิธี", "how", "ขั้นตอน", "อธิบาย", "เอกสาร", "document"]
+            use_rag = any(keyword in user_msg.lower() for keyword in doc_keywords)
+
+            if use_db and self.db_agent:
+                # Use database agent for queries about inspections
+                response = self.db_agent.query_database_nl(user_msg)
+            elif use_rag and self.doc_rag and self.doc_rag.get_document_count() > 0:
+                # Use document RAG for manual/documentation questions
+                response = self.doc_rag.ask_with_rag(user_msg)
+            else:
+                # Normal chat with context
+                context = self.get_ai_context()
+                response = self.ai_agent.chat(user_msg, context)
+
+            # Remove thinking indicator
+            html = self.chat_display.toHtml()
+            html = html.replace("<i>🤔 AI กำลังคิด...</i><br>", "")
+            self.chat_display.setHtml(html)
+
+            # Add AI response
+            self.chat_display.append(f"<b>🤖 AI:</b><br>{response}<br><hr>")
+            self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+
+        except Exception as e:
+            html = self.chat_display.toHtml()
+            html = html.replace("<i>🤔 AI กำลังคิด...</i><br>", "")
+            self.chat_display.setHtml(html)
+            self.chat_display.append(f"<b>❌ Error:</b> {str(e)}<br><hr>")
+
+    def get_ai_context(self):
+        """Get current context for AI"""
+        context = {}
+
+        # Get today's stats
+        if self.db_agent:
+            try:
+                stats = self.db_agent.get_statistics("today")
+                context["today_stats"] = stats
+            except:
+                pass
+
+        return context
+
+    def ai_quick_action(self, action):
+        """Handle quick action buttons"""
+        if action == "analyze_today":
+            self.chat_input.setText("วิเคราะห์ผลการตรวจสอบวันนี้")
+            self.send_ai_message()
+        elif action == "top_defects":
+            self.chat_input.setText("แสดง devices และผลการตรวจสอบ")
+            self.send_ai_message()
+        elif action == "list_docs":
+            if self.doc_rag:
+                doc_list = self.doc_rag.list_documents()
+                self.chat_display.append(f"<b>📚 เอกสารในระบบ:</b><br>{doc_list.replace(chr(10), '<br>')}<br><hr>")
+            else:
+                self.chat_display.append("<b>⚠️ Document RAG ไม่พร้อมใช้งาน</b><br><hr>")
+
+    def ai_clear_chat(self):
+        """Clear chat history"""
+        if self.ai_agent:
+            self.ai_agent.clear_history()
+        self.chat_display.clear()
+        self.chat_display.setHtml("<i>✓ ล้างประวัติการสนทนาแล้ว</i>")
+        self.statusBar.showMessage("ล้างประวัติการสนทนา AI แล้ว", 3000)
 
 
 class FullscreenImageDialog(QDialog):

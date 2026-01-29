@@ -1,0 +1,102 @@
+# MVI Edge Inspection Quick Guide
+
+## Overview
+MVI (Maximo Visual Inspection) Edge is an AI-powered visual inspection system for manufacturing quality control.
+
+## Getting Started
+
+### 1. Installation
+- Install MVI Edge Server
+- Configure camera connections
+- Upload trained models
+
+### 2. Configuration
+
+#### Detection Threshold
+- Navigate to: Models > [Model Name] > Settings
+- Adjust Detection Threshold (0.0-1.0)
+- Higher threshold = fewer false positives
+- Lower threshold = better detection but more false positives
+- Recommended: 0.7-0.8 for most cases
+
+#### Camera Setup
+- Resolution: 1920x1080 or higher recommended
+- Frame rate: 30 FPS minimum
+- Lighting: Even, diffused lighting works best
+- Distance: Depends on object size and lens
+
+### 3. MQTT Configuration
+- Broker: localhost or remote server
+- Port: 1883 (default) or 8883 (TLS)
+- QoS: 1 recommended
+- Topics:
+  - Trigger: mvi/{device}/trigger
+  - Result: mvi/{device}/result
+
+## Common Issues
+
+### Issue: High false positive rate
+Solution:
+1. Increase detection threshold
+2. Improve lighting conditions
+3. Retrain model with more data
+4. Check camera focus
+
+### Issue: Missing defects
+Solution:
+1. Lower detection threshold
+2. Check lighting (shadows can hide defects)
+3. Verify model includes this defect type
+4. Add more training images
+
+### Issue: MQTT connection drops
+Solution:
+1. Check network stability
+2. Increase keep-alive interval
+3. Use QoS 1 or 2
+4. Verify firewall settings
+
+## Best Practices
+
+### Training Data
+- Minimum 50-100 images per defect type
+- Include variations in lighting, angles, positions
+- Balance pass/fail ratio
+- Label carefully and consistently
+
+### Inspection Setup
+- Fixed camera position
+- Consistent lighting
+- Clean camera lens regularly
+- Calibrate camera if needed
+
+### Performance
+- Use GPU for faster inference
+- Optimize image resolution
+- Process images sequentially
+- Monitor CPU/GPU usage
+
+## API Reference
+
+### Trigger Inspection
+```json
+Topic: mvi/{device}/trigger
+Payload: {"action": "trigger"}
+```
+
+### Inspection Result
+```json
+Topic: mvi/{device}/result
+Payload: {
+  "Overall Result": "pass|fail",
+  "Device ID": "camera_01",
+  "Image ID": "12345.jpg",
+  "Confidence": 0.95,
+  "Rule Results": [...]
+}
+```
+
+## Support
+- Documentation: https://www.ibm.com/docs/en/maximo-vi
+- Forum: IBM MVI Community
+- Email: support@ibm.com
