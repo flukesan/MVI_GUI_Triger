@@ -114,15 +114,42 @@ class MVITriggerGUI(QMainWindow):
                 self.db_agent = DatabaseAgent(self.ai_agent, db_connection)
                 print("✓ Database agent initialized")
 
-                # Initialize Intelligent Engine (Level 1: Enhanced reasoning)
+                # Initialize Intelligent Engine
+                # Check environment variable or default to V2
+                import os
+                use_v2 = os.environ.get('USE_ENGINE_V2', 'true').lower() == 'true'
+
                 try:
-                    from intelligent_engine import IntelligentAIEngine
-                    self.intelligent_engine = IntelligentAIEngine(
-                        self.ai_agent,
-                        self.db_agent,
-                        self.doc_rag
-                    )
-                    print("✓ Intelligent AI Engine initialized (Level 1)")
+                    if use_v2:
+                        # Try Level 2 engine first (ReAct + Context Memory + Multi-Agent)
+                        try:
+                            from intelligent_engine_v2 import IntelligentAIEngineV2
+                            self.intelligent_engine = IntelligentAIEngineV2(
+                                self.ai_agent,
+                                self.db_agent,
+                                self.doc_rag,
+                                mode='auto'  # auto, react, multi-agent, simple
+                            )
+                            print("✓ Intelligent AI Engine V2 initialized (Level 2)")
+                        except ImportError as e:
+                            # Fallback to V1
+                            print(f"⚠️ V2 not available ({e}), using V1")
+                            from intelligent_engine import IntelligentAIEngine
+                            self.intelligent_engine = IntelligentAIEngine(
+                                self.ai_agent,
+                                self.db_agent,
+                                self.doc_rag
+                            )
+                            print("✓ Intelligent AI Engine initialized (Level 1)")
+                    else:
+                        # Use Level 1 engine
+                        from intelligent_engine import IntelligentAIEngine
+                        self.intelligent_engine = IntelligentAIEngine(
+                            self.ai_agent,
+                            self.db_agent,
+                            self.doc_rag
+                        )
+                        print("✓ Intelligent AI Engine initialized (Level 1)")
                 except Exception as e:
                     print(f"⚠️ Intelligent Engine not available: {e}")
 
