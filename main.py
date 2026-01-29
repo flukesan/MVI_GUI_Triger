@@ -115,34 +115,48 @@ class MVITriggerGUI(QMainWindow):
                 print("✓ Database agent initialized")
 
                 # Initialize Intelligent Engine
-                # Check environment variable or default to V2
+                # Check environment variable (default to V3)
                 import os
-                use_v2 = os.environ.get('USE_ENGINE_V2', 'true').lower() == 'true'
+                engine_version = os.environ.get('ENGINE_VERSION', '3')  # 1, 2, or 3
 
                 try:
-                    if use_v2:
-                        # Try Level 2 engine first (ReAct + Context Memory + Multi-Agent)
+                    if engine_version == '3':
+                        # Try Level 3 engine (Vector Search + Self-Reflection + Long-term Memory)
                         try:
+                            from intelligent_engine_v3 import IntelligentAIEngineV3
+                            self.intelligent_engine = IntelligentAIEngineV3(
+                                self.ai_agent,
+                                self.db_agent,
+                                self.doc_rag,
+                                mode='auto',
+                                enable_vector_search=True  # Requires sentence-transformers
+                            )
+                            print("✓ Intelligent AI Engine V3 initialized (Level 3)")
+                        except ImportError as e:
+                            # Fallback to V2
+                            print(f"⚠️ V3 not available ({e}), using V2")
                             from intelligent_engine_v2 import IntelligentAIEngineV2
                             self.intelligent_engine = IntelligentAIEngineV2(
                                 self.ai_agent,
                                 self.db_agent,
                                 self.doc_rag,
-                                mode='auto'  # auto, react, multi-agent, simple
+                                mode='auto'
                             )
                             print("✓ Intelligent AI Engine V2 initialized (Level 2)")
-                        except ImportError as e:
-                            # Fallback to V1
-                            print(f"⚠️ V2 not available ({e}), using V1")
-                            from intelligent_engine import IntelligentAIEngine
-                            self.intelligent_engine = IntelligentAIEngine(
-                                self.ai_agent,
-                                self.db_agent,
-                                self.doc_rag
-                            )
-                            print("✓ Intelligent AI Engine initialized (Level 1)")
-                    else:
-                        # Use Level 1 engine
+
+                    elif engine_version == '2':
+                        # Use Level 2 engine (ReAct + Context Memory + Multi-Agent)
+                        from intelligent_engine_v2 import IntelligentAIEngineV2
+                        self.intelligent_engine = IntelligentAIEngineV2(
+                            self.ai_agent,
+                            self.db_agent,
+                            self.doc_rag,
+                            mode='auto'
+                        )
+                        print("✓ Intelligent AI Engine V2 initialized (Level 2)")
+
+                    else:  # engine_version == '1'
+                        # Use Level 1 engine (Query Understanding + Chain-of-Thought)
                         from intelligent_engine import IntelligentAIEngine
                         self.intelligent_engine = IntelligentAIEngine(
                             self.ai_agent,
@@ -150,6 +164,7 @@ class MVITriggerGUI(QMainWindow):
                             self.doc_rag
                         )
                         print("✓ Intelligent AI Engine initialized (Level 1)")
+
                 except Exception as e:
                     print(f"⚠️ Intelligent Engine not available: {e}")
 
