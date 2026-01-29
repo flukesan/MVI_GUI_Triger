@@ -92,6 +92,7 @@ class MVITriggerGUI(QMainWindow):
         self.ai_agent = None
         self.doc_rag = None
         self.db_agent = None
+        self.intelligent_engine = None
         if AI_AVAILABLE:
             try:
                 self.ai_agent = AIAgent()
@@ -112,6 +113,19 @@ class MVITriggerGUI(QMainWindow):
                 db_connection = sqlite3.connect(self.history_manager.db_path)
                 self.db_agent = DatabaseAgent(self.ai_agent, db_connection)
                 print("✓ Database agent initialized")
+
+                # Initialize Intelligent Engine (Level 1: Enhanced reasoning)
+                try:
+                    from intelligent_engine import IntelligentAIEngine
+                    self.intelligent_engine = IntelligentAIEngine(
+                        self.ai_agent,
+                        self.db_agent,
+                        self.doc_rag
+                    )
+                    print("✓ Intelligent AI Engine initialized (Level 1)")
+                except Exception as e:
+                    print(f"⚠️ Intelligent Engine not available: {e}")
+
             except Exception as e:
                 print(f"⚠️ Failed to initialize database agent: {e}")
 
@@ -1677,26 +1691,32 @@ class MVITriggerGUI(QMainWindow):
 
         # Process in background (simple approach - could use QThread for better UX)
         try:
-            # Check if need database query
-            db_keywords = ["ตรวจสอบ", "inspection", "รายละเอียด", "detail", "เมื่อไหร่", "when", "กี่ครั้ง", "how many",
-                          "fail", "pass", "วันนี้", "today", "เครื่อง", "device", "ล่าสุด", "latest", "recent",
-                          "แสดง", "show", "list", "จำนวน", "count", "สถิติ", "stat", "วิเคราะห์", "analyze"]
-            use_db = any(keyword in user_msg.lower() for keyword in db_keywords)
-
-            # Check if need document search
-            doc_keywords = ["คู่มือ", "manual", "วิธี", "how", "ขั้นตอน", "อธิบาย", "เอกสาร", "document"]
-            use_rag = any(keyword in user_msg.lower() for keyword in doc_keywords)
-
-            if use_db and self.db_agent:
-                # Use database agent for queries about inspections
-                response = self.db_agent.query_database_nl(user_msg)
-            elif use_rag and self.doc_rag and self.doc_rag.get_document_count() > 0:
-                # Use document RAG for manual/documentation questions
-                response = self.doc_rag.ask_with_rag(user_msg)
+            # Use Intelligent Engine if available (Level 1: Enhanced reasoning)
+            if self.intelligent_engine:
+                # Intelligent Engine handles query understanding, routing, and reasoning automatically
+                response = self.intelligent_engine.process_query(user_msg)
             else:
-                # Normal chat with context
-                context = self.get_ai_context()
-                response = self.ai_agent.chat(user_msg, context)
+                # Fallback to basic routing
+                # Check if need database query
+                db_keywords = ["ตรวจสอบ", "inspection", "รายละเอียด", "detail", "เมื่อไหร่", "when", "กี่ครั้ง", "how many",
+                              "fail", "pass", "วันนี้", "today", "เครื่อง", "device", "ล่าสุด", "latest", "recent",
+                              "แสดง", "show", "list", "จำนวน", "count", "สถิติ", "stat", "วิเคราะห์", "analyze"]
+                use_db = any(keyword in user_msg.lower() for keyword in db_keywords)
+
+                # Check if need document search
+                doc_keywords = ["คู่มือ", "manual", "วิธี", "how", "ขั้นตอน", "อธิบาย", "เอกสาร", "document"]
+                use_rag = any(keyword in user_msg.lower() for keyword in doc_keywords)
+
+                if use_db and self.db_agent:
+                    # Use database agent for queries about inspections
+                    response = self.db_agent.query_database_nl(user_msg)
+                elif use_rag and self.doc_rag and self.doc_rag.get_document_count() > 0:
+                    # Use document RAG for manual/documentation questions
+                    response = self.doc_rag.ask_with_rag(user_msg)
+                else:
+                    # Normal chat with context
+                    context = self.get_ai_context()
+                    response = self.ai_agent.chat(user_msg, context)
 
             # Remove thinking indicator
             html = self.chat_display.toHtml()
