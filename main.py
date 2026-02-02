@@ -36,6 +36,10 @@ from history_widget import HistoryWidget
 # Component Definition modules
 try:
     from component_definition_widget import ComponentDefinitionWidget
+    from component_definition import ComponentDefinitionManager
+    from mvi_component_integration import MVIComponentIntegration
+    import cv2
+    import numpy as np
     COMPONENT_DEF_AVAILABLE = True
 except ImportError as e:
     print(f"⚠️ Component Definition not available: {e}")
@@ -95,6 +99,17 @@ class MVITriggerGUI(QMainWindow):
         self.config = self.load_config()
         self.mqtt_client = None
         self.history_manager = HistoryManager()  # Initialize history manager
+
+        # Initialize Component Definition (if available)
+        self.comp_manager = None
+        self.mvi_integration = None
+        if COMPONENT_DEF_AVAILABLE:
+            try:
+                self.comp_manager = ComponentDefinitionManager()
+                self.mvi_integration = MVIComponentIntegration(self.comp_manager)
+                print("✓ Component Definition integration initialized")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize Component Definition: {e}")
 
         # Initialize AI components (if available)
         self.ai_agent = None
@@ -473,6 +488,33 @@ class MVITriggerGUI(QMainWindow):
         topic_group.setLayout(topic_main_layout)
         live_layout.addWidget(topic_group)
 
+        # ========== Component Definition Product Selection ==========
+        if COMPONENT_DEF_AVAILABLE and self.comp_manager:
+            product_group = QGroupBox("🎯 Component Definition (ตรวจสอบวัตถุที่หายไป)")
+            product_layout = QHBoxLayout()
+
+            self.enable_component_check = QCheckBox("Enable Component Check")
+            self.enable_component_check.setToolTip("เปิดใช้งานการตรวจสอบ Component ที่หายไป (วาดกรอบสีแดง)")
+            self.enable_component_check.stateChanged.connect(self.on_component_check_changed)
+            product_layout.addWidget(self.enable_component_check)
+
+            product_layout.addWidget(QLabel("Product:"))
+
+            self.product_combo = QComboBox()
+            self.product_combo.setMinimumHeight(35)
+            self.product_combo.setToolTip("เลือก Product ที่ต้องการตรวจสอบ Component")
+            self.update_product_list()
+            product_layout.addWidget(self.product_combo, 1)
+
+            refresh_product_btn = QPushButton("🔄")
+            refresh_product_btn.setMaximumWidth(40)
+            refresh_product_btn.setToolTip("รีเฟรชรายการ Product")
+            refresh_product_btn.clicked.connect(self.update_product_list)
+            product_layout.addWidget(refresh_product_btn)
+
+            product_group.setLayout(product_layout)
+            live_layout.addWidget(product_group)
+
         # ========== Dual Camera Display (Side by Side) ==========
         cameras_layout = QHBoxLayout()
 
@@ -634,6 +676,27 @@ class MVITriggerGUI(QMainWindow):
         """Update topic combo box with current topics"""
         self.topic_combo.clear()
         self.topic_combo.addItems(self.config.get("topics", []))
+
+    def update_product_list(self):
+        """Update product combo box with available products"""
+        if not (COMPONENT_DEF_AVAILABLE and self.comp_manager):
+            return
+
+        if hasattr(self, 'product_combo'):
+            self.product_combo.clear()
+            self.product_combo.addItem("-- Select Product --", None)
+
+            products = self.comp_manager.list_products()
+            for product in products:
+                self.product_combo.addItem(
+                    f"{product['name']} ({product['component_count']} components)",
+                    product['id']
+                )
+
+    def on_component_check_changed(self, state):
+        """Handle component check enable/disable"""
+        if hasattr(self, 'product_combo'):
+            self.product_combo.setEnabled(state == Qt.CheckState.Checked.value)
 
     def update_checkbox_list(self):
         """Update checkbox list with current topics"""
@@ -1322,10 +1385,82 @@ class MVITriggerGUI(QMainWindow):
                 pixmap = QPixmap(image_path)
 
                 if not pixmap.isNull():
-                    # Draw bounding boxes if detected objects exist
+                    # Check if Component Definition is enabled and product is selected
+                    use_component_def = False
+                    product_id = None
+
+                    if (COMPONENT_DEF_AVAILABLE and
+                        hasattr(self, 'enable_component_check') and
+                        self.enable_component_check.isChecked() and
+                        hasattr(self, 'product_combo')):
+                        product_id = self.product_combo.currentData()
+                        if product_id:
+                            use_component_def = True
+
+                    # Draw bounding boxes with Component Definition if enabled
                     if detected_objects and isinstance(detected_objects, list) and len(detected_objects) > 0:
-                        pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
-                        print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
+                        if use_component_def and self.mvi_integration:
+                            # Use Component Definition Integration
+                            print(f"🎯 Using Component Definition for product ID: {product_id}")
+
+                            # Convert QPixmap to numpy array for OpenCV processing
+                            qimage = pixmap.toImage()
+                            width = qimage.width()
+                            height = qimage.height()
+                            ptr = qimage.bits()
+                            ptr.setsize(height * width * 4)
+                            arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
+                            # Convert RGBA to BGR for OpenCV
+                            cv_image = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+                            # Convert MVI detected_objects to expected format
+                            mvi_detections = []
+                            for obj in detected_objects:
+                                rectangle = obj.get("rectangle", {})
+                                min_point = rectangle.get("min", {})
+                                max_point = rectangle.get("max", {})
+
+                                x1 = min_point.get("x", 0)
+                                y1 = min_point.get("y", 0)
+                                x2 = max_point.get("x", 0)
+                                y2 = max_point.get("y", 0)
+
+                                mvi_detections.append({
+                                    "class": obj.get("label", "Unknown"),
+                                    "confidence": obj.get("score", 0.0),
+                                    "bbox": {
+                                        "x": x1,
+                                        "y": y1,
+                                        "width": x2 - x1,
+                                        "height": y2 - y1
+                                    }
+                                })
+
+                            # Process with Component Definition
+                            result = self.mvi_integration.process_mvi_result(
+                                cv_image,
+                                mvi_detections,
+                                product_id
+                            )
+
+                            # Convert annotated image back to QPixmap
+                            annotated_image = result["annotated_image"]
+                            height, width, channel = annotated_image.shape
+                            bytes_per_line = 3 * width
+                            rgb_image = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
+                            qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                            pixmap = QPixmap.fromImage(qimage)
+
+                            print(f"✓ Component Definition: Status={result['status']}")
+                            if result['missing_positions']:
+                                print(f"  ❌ Missing: {', '.join(result['missing_positions'])}")
+                            else:
+                                print(f"  ✅ All components found")
+
+                        else:
+                            # Use standard bounding box drawing
+                            pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
+                            print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
 
                     # Save pixmap for history
                     image_pixmap_for_history = pixmap
