@@ -204,26 +204,29 @@ class MVIComponentIntegration:
         """
         หา detected object ที่ตรงกับ expected
 
-        Matching criteria:
-        1. Class name ต้องตรงกัน
-        2. ตำแหน่งต้องใกล้กัน (center distance < tolerance)
+        Matching criteria (in order of priority):
+        1. Class name ต้องตรงกัน (partial match)
+        2. IoU > 10% (primary - ยืดหยุ่นกับการวางที่คลาดเคลื่อน)
+        3. Center distance < tolerance (fallback)
         """
 
         expected_center = self._calculate_center(expected["roi"])
         tolerance = expected.get("tolerance", 50)
+        min_iou = 0.05  # ยอมรับถ้ากรอบทับกันอย่างน้อย 5% (ยืดหยุ่นกับการวางคลาดเคลื่อน)
 
         best_match = None
-        best_distance = float('inf')
+        best_score = 0.0  # IoU score หรือ 1/distance
 
         print(f"\n  🔍 Matching '{expected['name']}':")
-        print(f"     Expected center: {expected_center}, Tolerance: {tolerance}px")
+        print(f"     Expected: center={expected_center}, size={expected['roi']['width']}x{expected['roi']['height']}")
+        print(f"     Matching: IoU>{min_iou*100:.0f}% OR distance<{tolerance}px")
 
         for detection in detections:
             # เช็ค class name (case insensitive + partial match)
             detected_class = detection["class"].lower()
             expected_class = expected["name"].lower()
 
-            print(f"     Checking: '{detection['class']}' (confidence: {detection['confidence']:.2f})")
+            print(f"\n     Checking: '{detection['class']}' (confidence: {detection['confidence']:.2f})")
 
             # Check if expected class is contained in detected class or vice versa
             # This handles cases like "Pig Inspection" matching "pig"
@@ -235,23 +238,37 @@ class MVIComponentIntegration:
                 print(f"       ❌ Class mismatch: '{detected_class}' !contains '{expected_class}'")
                 continue
 
-            print(f"       ✓ Class match! ('{expected_class}' found in '{detected_class}')")
+            print(f"       ✓ Class match!")
 
-            # เช็คตำแหน่ง (center distance)
+            # Method 1: ลอง IoU ก่อน (primary)
+            iou = self._calculate_iou(expected["roi"], detection["bbox"])
+            print(f"       📐 IoU: {iou:.3f} ({iou*100:.1f}%)")
+
+            if iou > min_iou:
+                # Match by IoU - ยืดหยุ่นมาก เหมาะกับการวางที่คลาดเคลื่อน
+                if iou > best_score:
+                    best_match = detection
+                    best_score = iou
+                    print(f"       ✅ MATCH by IoU! (best so far: {iou:.3f})")
+                continue
+
+            # Method 2: ลอง center distance (fallback)
             detected_center = self._calculate_center(detection["bbox"])
             distance = self._calculate_distance(expected_center, detected_center)
+            print(f"       📏 Center distance: {distance:.1f}px (tolerance: {tolerance}px)")
 
-            print(f"       ✓ Class match! Detected center: {detected_center}, Distance: {distance:.1f}px")
-
-            if distance <= tolerance and distance < best_distance:
-                best_match = detection
-                best_distance = distance
-                print(f"       ✅ BEST MATCH (distance: {distance:.1f}px)")
+            if distance <= tolerance:
+                # Match by distance
+                score = 1.0 / (distance + 1)  # ยิ่งใกล้ยิ่งดี
+                if score > best_score:
+                    best_match = detection
+                    best_score = score
+                    print(f"       ✅ MATCH by distance! (best so far: {distance:.1f}px)")
 
         if best_match:
-            print(f"     ✅ Found match: {best_match['class']} at distance {best_distance:.1f}px")
+            print(f"     ✅ Found best match: {best_match['class']}")
         else:
-            print(f"     ❌ No match found")
+            print(f"     ❌ No match found (all detections failed IoU and distance check)")
 
         return best_match
 
