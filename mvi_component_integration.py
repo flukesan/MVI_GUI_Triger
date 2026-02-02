@@ -215,18 +215,43 @@ class MVIComponentIntegration:
         best_match = None
         best_distance = float('inf')
 
+        print(f"\n  🔍 Matching '{expected['name']}':")
+        print(f"     Expected center: {expected_center}, Tolerance: {tolerance}px")
+
         for detection in detections:
-            # เช็ค class name
-            if detection["class"] != expected["name"]:
+            # เช็ค class name (case insensitive + partial match)
+            detected_class = detection["class"].lower()
+            expected_class = expected["name"].lower()
+
+            print(f"     Checking: '{detection['class']}' (confidence: {detection['confidence']:.2f})")
+
+            # Check if expected class is contained in detected class or vice versa
+            # This handles cases like "Pig Inspection" matching "pig"
+            is_match = (expected_class in detected_class or
+                       detected_class in expected_class or
+                       expected_class == detected_class)
+
+            if not is_match:
+                print(f"       ❌ Class mismatch: '{detected_class}' !contains '{expected_class}'")
                 continue
+
+            print(f"       ✓ Class match! ('{expected_class}' found in '{detected_class}')")
 
             # เช็คตำแหน่ง (center distance)
             detected_center = self._calculate_center(detection["bbox"])
             distance = self._calculate_distance(expected_center, detected_center)
 
+            print(f"       ✓ Class match! Detected center: {detected_center}, Distance: {distance:.1f}px")
+
             if distance <= tolerance and distance < best_distance:
                 best_match = detection
                 best_distance = distance
+                print(f"       ✅ BEST MATCH (distance: {distance:.1f}px)")
+
+        if best_match:
+            print(f"     ✅ Found match: {best_match['class']} at distance {best_distance:.1f}px")
+        else:
+            print(f"     ❌ No match found")
 
         return best_match
 

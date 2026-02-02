@@ -1415,6 +1415,7 @@ class MVITriggerGUI(QMainWindow):
 
                             # Convert MVI detected_objects to expected format
                             mvi_detections = []
+                            print(f"\n  📦 Converting {len(detected_objects)} detected objects:")
                             for obj in detected_objects:
                                 rectangle = obj.get("rectangle", {})
                                 min_point = rectangle.get("min", {})
@@ -1425,7 +1426,7 @@ class MVITriggerGUI(QMainWindow):
                                 x2 = max_point.get("x", 0)
                                 y2 = max_point.get("y", 0)
 
-                                mvi_detections.append({
+                                detection = {
                                     "class": obj.get("label", "Unknown"),
                                     "confidence": obj.get("score", 0.0),
                                     "bbox": {
@@ -1434,7 +1435,11 @@ class MVITriggerGUI(QMainWindow):
                                         "width": x2 - x1,
                                         "height": y2 - y1
                                     }
-                                })
+                                }
+                                mvi_detections.append(detection)
+                                print(f"    - {detection['class']} (conf: {detection['confidence']:.2f}, "
+                                      f"pos: {detection['bbox']['x']},{detection['bbox']['y']}, "
+                                      f"size: {detection['bbox']['width']}x{detection['bbox']['height']})")
 
                             # Process with Component Definition
                             result = self.mvi_integration.process_mvi_result(
