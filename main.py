@@ -33,6 +33,14 @@ from mqtt_client import MQTTClient
 from history_manager import HistoryManager
 from history_widget import HistoryWidget
 
+# Component Definition modules
+try:
+    from component_definition_widget import ComponentDefinitionWidget
+    COMPONENT_DEF_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Component Definition not available: {e}")
+    COMPONENT_DEF_AVAILABLE = False
+
 # AI modules (optional - graceful degradation if not available)
 try:
     from ai_agent import AIAgent
@@ -284,6 +292,11 @@ class MVITriggerGUI(QMainWindow):
         # Create History tab
         self.history_widget = HistoryWidget()
         self.tabs.addTab(self.history_widget, "📋 History")
+
+        # Create Component Definition tab (if available)
+        if COMPONENT_DEF_AVAILABLE:
+            self.component_def_widget = ComponentDefinitionWidget()
+            self.tabs.addTab(self.component_def_widget, "📋 Component Definition")
 
         # Create AI Assistant tab (if available)
         if AI_AVAILABLE and self.ai_agent:
