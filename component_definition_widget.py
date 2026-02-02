@@ -47,6 +47,8 @@ class ImageROISelector(QLabel):
         self.setStyleSheet("border: 2px solid #cccccc; background-color: #f5f5f5;")
 
         self.original_pixmap = None
+        self.original_size = None  # เก็บขนาดภาพจริง
+        self.scale_factor = 1.0    # อัตราส่วนการ scale
         self.drawing = False
         self.start_point = None
         self.current_rect = None
@@ -56,6 +58,7 @@ class ImageROISelector(QLabel):
     def load_image(self, image_path):
         """โหลดภาพ"""
         self.original_pixmap = QPixmap(image_path)
+        self.original_size = self.original_pixmap.size()
         self.update_display()
 
     def update_display(self):
@@ -68,6 +71,10 @@ class ImageROISelector(QLabel):
                 Qt.TransformationMode.SmoothTransformation
             )
 
+            # คำนวณ scale factor
+            if self.original_size:
+                self.scale_factor = scaled.width() / self.original_size.width()
+
             # Draw ROIs
             painter = QPainter(scaled)
 
@@ -79,12 +86,15 @@ class ImageROISelector(QLabel):
                 else:
                     pen = QPen(color, 2)
                 painter.setPen(pen)
-                painter.drawRect(roi["rect"])
+
+                # แปลง rect จาก original coordinates เป็น scaled coordinates
+                scaled_rect = self._scale_rect_to_display(roi["rect"])
+                painter.drawRect(scaled_rect)
 
                 # Draw label
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
                 painter.drawText(
-                    roi["rect"].topLeft() + QPoint(5, -5),
+                    scaled_rect.topLeft() + QPoint(5, -5),
                     roi["name"]
                 )
 
@@ -119,14 +129,16 @@ class ImageROISelector(QLabel):
             # ROI will be added via add_roi() method called from parent
 
     def add_roi(self, name, rect, color):
-        """เพิ่ม ROI"""
+        """เพิ่ม ROI (rect ต้องเป็น original coordinates)"""
         self.rois.append({"name": name, "rect": rect, "color": color})
         self.current_rect = None
         self.update_display()
 
     def get_current_rect(self):
-        """ดึง rect ปัจจุบัน"""
-        return self.current_rect
+        """ดึง rect ปัจจุบัน (ใน original coordinates)"""
+        if self.current_rect:
+            return self._scale_rect_to_original(self.current_rect)
+        return None
 
     def clear_current_rect(self):
         """ล้าง rect ปัจจุบัน"""
@@ -152,6 +164,31 @@ class ImageROISelector(QLabel):
         self.selected_roi_index = None
         self.update_display()
 
+    def _scale_rect_to_display(self, rect):
+        """แปลง rect จาก original coordinates เป็น display coordinates"""
+        return QRect(
+            int(rect.x() * self.scale_factor),
+            int(rect.y() * self.scale_factor),
+            int(rect.width() * self.scale_factor),
+            int(rect.height() * self.scale_factor)
+        )
+
+    def _scale_rect_to_original(self, rect):
+        """แปลง rect จาก display coordinates เป็น original coordinates"""
+        if self.scale_factor > 0:
+            return QRect(
+                int(rect.x() / self.scale_factor),
+                int(rect.y() / self.scale_factor),
+                int(rect.width() / self.scale_factor),
+                int(rect.height() / self.scale_factor)
+            )
+        return rect
+
+    def resizeEvent(self, event):
+        """เมื่อ widget ถูก resize"""
+        super().resizeEvent(event)
+        self.update_display()
+
 
 class ComponentDefinitionWidget(QWidget):
     """Widget หลักสำหรับ Component Definition"""
@@ -161,6 +198,7 @@ class ComponentDefinitionWidget(QWidget):
         self.comp_manager = ComponentDefinitionManager()
         self.current_product_id = None
         self.golden_template_path = None
+        self.component_ids = []  # เก็บ component IDs จาก database
 
         self.init_ui()
         self.load_products()
@@ -245,10 +283,18 @@ class ComponentDefinitionWidget(QWidget):
         self.product_combo.currentIndexChanged.connect(self.on_product_changed)
         product_layout.addWidget(self.product_combo, 0, 1)
 
-        # New product button
+        # Product buttons
+        product_btn_layout = QHBoxLayout()
         new_product_btn = QPushButton("➕ New")
         new_product_btn.clicked.connect(self.create_new_product)
-        product_layout.addWidget(new_product_btn, 0, 2)
+        product_btn_layout.addWidget(new_product_btn)
+
+        delete_product_btn = QPushButton("🗑️ Delete")
+        delete_product_btn.clicked.connect(self.delete_product)
+        delete_product_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+        product_btn_layout.addWidget(delete_product_btn)
+
+        product_layout.addLayout(product_btn_layout, 0, 2)
 
         # Product name
         product_layout.addWidget(QLabel("Name:"), 1, 0)
@@ -430,6 +476,7 @@ class ComponentDefinitionWidget(QWidget):
 
         self.components_table.setRowCount(len(components))
         self.image_selector.clear_all_rois()
+        self.component_ids = []  # รีเซ็ต component IDs
 
         colors = [
             QColor(0, 255, 0),    # Green
@@ -440,6 +487,9 @@ class ComponentDefinitionWidget(QWidget):
         ]
 
         for i, comp in enumerate(components):
+            # เก็บ component ID
+            self.component_ids.append(comp['id'])
+
             self.components_table.setItem(i, 0, QTableWidgetItem(comp['name']))
             self.components_table.setItem(i, 1, QTableWidgetItem(comp.get('position', '')))
             self.components_table.setItem(i, 2, QTableWidgetItem(comp['type']))
@@ -459,6 +509,33 @@ class ComponentDefinitionWidget(QWidget):
         self.clear_form()
         self.product_name_input.setFocus()
 
+    def delete_product(self):
+        """ลบ Product"""
+        if not self.current_product_id:
+            QMessageBox.warning(self, "Warning", "กรุณาเลือก product ที่ต้องการลบ")
+            return
+
+        product_name = self.product_name_input.text()
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"ต้องการลบ product '{product_name}' และ components ทั้งหมดหรือไม่?\n\n"
+            "⚠️ การลบจะไม่สามารถกู้คืนได้!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.comp_manager.delete_product(self.current_product_id)
+                QMessageBox.information(self, "Success", f"ลบ product '{product_name}' แล้ว")
+
+                # Reload products list และล้างฟอร์ม
+                self.load_products()
+                self.clear_form()
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"ไม่สามารถลบ product:\n{str(e)}")
+
     def clear_form(self):
         """ล้างฟอร์ม"""
         self.product_name_input.clear()
@@ -472,6 +549,7 @@ class ComponentDefinitionWidget(QWidget):
         self.image_selector.clear_all_rois()
         self.golden_template_path = None
         self.template_path_label.setText("ยังไม่ได้เลือกภาพ")
+        self.component_ids = []  # ล้าง component IDs
 
     def add_component(self):
         """เพิ่ม Component"""
@@ -515,6 +593,9 @@ class ComponentDefinitionWidget(QWidget):
         color = colors[row % len(colors)]
         self.image_selector.add_roi(name, rect, color)
 
+        # เพิ่ม None ใน component_ids (ยังไม่มี database ID)
+        self.component_ids.append(None)
+
         # Clear inputs
         self.comp_name_input.clear()
         self.comp_position_input.clear()
@@ -535,6 +616,20 @@ class ComponentDefinitionWidget(QWidget):
             )
 
             if reply == QMessageBox.StandardButton.Yes:
+                # ลบจาก database ถ้ามี ID (component ที่มาจาก database)
+                if current_row < len(self.component_ids) and self.component_ids[current_row] is not None:
+                    component_id = self.component_ids[current_row]
+                    try:
+                        self.comp_manager.delete_component_definition(component_id)
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"ไม่สามารถลบจาก database:\n{str(e)}")
+                        return
+
+                # ลบ ID จากลิสต์
+                if current_row < len(self.component_ids):
+                    self.component_ids.pop(current_row)
+
+                # ลบจาก UI
                 self.components_table.removeRow(current_row)
                 self.image_selector.remove_roi(current_row)
                 QMessageBox.information(self, "Success", "ลบ component แล้ว")
@@ -552,6 +647,18 @@ class ComponentDefinitionWidget(QWidget):
             )
 
             if reply == QMessageBox.StandardButton.Yes:
+                # ลบจาก database ถ้ามี IDs (components ที่มาจาก database)
+                if self.component_ids:
+                    try:
+                        for component_id in self.component_ids:
+                            if component_id is not None:  # ข้าม component ที่ยังไม่ได้ save
+                                self.comp_manager.delete_component_definition(component_id)
+                        self.component_ids = []
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"ไม่สามารถลบจาก database:\n{str(e)}")
+                        return
+
+                # ล้าง UI
                 self.components_table.setRowCount(0)
                 self.image_selector.clear_all_rois()
                 QMessageBox.information(self, "Success", "ล้าง components แล้ว")
@@ -579,9 +686,6 @@ class ComponentDefinitionWidget(QWidget):
                 )
                 product_id = self.current_product_id
 
-                # Delete old components (will recreate)
-                # TODO: Implement update instead of delete+create
-
             else:
                 # Create new
                 product_id = self.comp_manager.create_product(
@@ -590,8 +694,13 @@ class ComponentDefinitionWidget(QWidget):
                     pass_threshold=self.pass_threshold_input.value()
                 )
 
-            # Add components
+            # Add/Update components
+            new_component_ids = []
             for row in range(self.components_table.rowCount()):
+                # ถ้ามี ID แล้ว (เป็น component ที่โหลดจาก database) ข้ามไป
+                if row < len(self.component_ids) and self.component_ids[row] is not None:
+                    new_component_ids.append(self.component_ids[row])
+                    continue
                 name = self.components_table.item(row, 0).text()
                 position = self.components_table.item(row, 1).text()
                 comp_type = self.components_table.item(row, 2).text()
@@ -603,7 +712,8 @@ class ComponentDefinitionWidget(QWidget):
                 roi_data = self.image_selector.rois[row]
                 rect = roi_data["rect"]
 
-                self.comp_manager.add_component_definition(
+                # เพิ่ม component ใหม่และเก็บ ID
+                component_id = self.comp_manager.add_component_definition(
                     product_id=product_id,
                     component_name=name,
                     component_type=comp_type,
@@ -618,6 +728,10 @@ class ComponentDefinitionWidget(QWidget):
                     min_confidence=confidence,
                     is_critical=critical
                 )
+                new_component_ids.append(component_id)
+
+            # อัพเดท component IDs list
+            self.component_ids = new_component_ids
 
             QMessageBox.information(
                 self,
