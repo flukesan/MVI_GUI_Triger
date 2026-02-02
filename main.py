@@ -16,7 +16,7 @@ try:
         QRadioButton, QCheckBox
     )
     from PyQt6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
+    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QImage, QPainter, QPen
     print("Using PyQt6")
 except ImportError:
     from PySide6.QtWidgets import (
@@ -26,7 +26,7 @@ except ImportError:
         QRadioButton, QCheckBox
     )
     from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
+    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QImage, QPainter, QPen
     print("Using PySide6")
 
 from mqtt_client import MQTTClient
