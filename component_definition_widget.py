@@ -200,6 +200,11 @@ class ComponentDefinitionWidget(QWidget):
         self.golden_template_path = None
         self.component_ids = []  # เก็บ component IDs จาก database
 
+        # Edit mode tracking
+        self.editing_mode = False
+        self.editing_row = None
+        self.editing_component_id = None
+
         self.init_ui()
         self.load_products()
 
@@ -361,11 +366,18 @@ class ComponentDefinitionWidget(QWidget):
 
         component_layout.addLayout(form_layout)
 
-        # Add component button
-        add_comp_btn = QPushButton("➕ Add Component")
-        add_comp_btn.clicked.connect(self.add_component)
-        add_comp_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 8px; font-weight: bold;")
-        component_layout.addWidget(add_comp_btn)
+        # Add/Update component button
+        self.add_comp_btn = QPushButton("➕ Add Component")
+        self.add_comp_btn.clicked.connect(self.add_or_update_component)
+        self.add_comp_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 8px; font-weight: bold;")
+        component_layout.addWidget(self.add_comp_btn)
+
+        # Cancel edit button (hidden by default)
+        self.cancel_edit_btn = QPushButton("❌ Cancel Edit")
+        self.cancel_edit_btn.clicked.connect(self.cancel_edit)
+        self.cancel_edit_btn.setStyleSheet("background-color: #95a5a6; color: white; padding: 8px;")
+        self.cancel_edit_btn.setVisible(False)
+        component_layout.addWidget(self.cancel_edit_btn)
 
         component_group.setLayout(component_layout)
         layout.addWidget(component_group)
@@ -384,6 +396,12 @@ class ComponentDefinitionWidget(QWidget):
 
         # Table buttons
         table_btn_layout = QHBoxLayout()
+
+        edit_btn = QPushButton("✏️ Edit")
+        edit_btn.clicked.connect(self.edit_component)
+        edit_btn.setStyleSheet("background-color: #f39c12; color: white; padding: 5px;")
+        table_btn_layout.addWidget(edit_btn)
+
         remove_btn = QPushButton("🗑️ Remove")
         remove_btn.clicked.connect(self.remove_component)
         table_btn_layout.addWidget(remove_btn)
@@ -540,37 +558,85 @@ class ComponentDefinitionWidget(QWidget):
         """ล้างฟอร์ม"""
         self.product_name_input.clear()
         self.pass_threshold_input.setValue(1.0)
-        self.comp_name_input.clear()
-        self.comp_position_input.clear()
-        self.tolerance_input.setValue(50)
-        self.confidence_input.setValue(0.8)
-        self.critical_checkbox.setChecked(True)
+        self.clear_component_form()
         self.components_table.setRowCount(0)
         self.image_selector.clear_all_rois()
         self.golden_template_path = None
         self.template_path_label.setText("ยังไม่ได้เลือกภาพ")
         self.component_ids = []  # ล้าง component IDs
 
-    def add_component(self):
-        """เพิ่ม Component"""
+    def clear_component_form(self):
+        """ล้างฟอร์ม component เท่านั้น"""
+        self.comp_name_input.clear()
+        self.comp_position_input.clear()
+        self.comp_type_combo.setCurrentIndex(0)
+        self.tolerance_input.setValue(50)
+        self.confidence_input.setValue(0.8)
+        self.critical_checkbox.setChecked(True)
+        self.image_selector.clear_current_rect()
+
+        # Reset edit mode
+        self.editing_mode = False
+        self.editing_row = None
+        self.editing_component_id = None
+        self.add_comp_btn.setText("➕ Add Component")
+        self.add_comp_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 8px; font-weight: bold;")
+        self.cancel_edit_btn.setVisible(False)
+
+    def edit_component(self):
+        """แก้ไข Component ที่เลือก"""
+        current_row = self.components_table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Warning", "กรุณาเลือก component ที่ต้องการแก้ไข")
+            return
+
+        # โหลดข้อมูลจาก table มาใส่ในฟอร์ม
+        name = self.components_table.item(current_row, 0).text()
+        position = self.components_table.item(current_row, 1).text()
+        comp_type = self.components_table.item(current_row, 2).text()
+        tolerance = int(self.components_table.item(current_row, 3).text())
+        confidence = float(self.components_table.item(current_row, 4).text())
+        critical = self.components_table.item(current_row, 5).text() == "✓"
+
+        # ใส่ข้อมูลในฟอร์ม
+        self.comp_name_input.setText(name)
+        self.comp_position_input.setText(position)
+
+        # หา index ของ type ใน combo box
+        type_index = self.comp_type_combo.findText(comp_type)
+        if type_index >= 0:
+            self.comp_type_combo.setCurrentIndex(type_index)
+
+        self.tolerance_input.setValue(tolerance)
+        self.confidence_input.setValue(confidence)
+        self.critical_checkbox.setChecked(critical)
+
+        # ตั้งค่า edit mode
+        self.editing_mode = True
+        self.editing_row = current_row
+        self.editing_component_id = self.component_ids[current_row] if current_row < len(self.component_ids) else None
+
+        # เปลี่ยนปุ่มเป็น Update
+        self.add_comp_btn.setText("💾 Update Component")
+        self.add_comp_btn.setStyleSheet("background-color: #f39c12; color: white; padding: 8px; font-weight: bold;")
+        self.cancel_edit_btn.setVisible(True)
+
+        # Highlight ROI ที่กำลังแก้ไข
+        self.image_selector.select_roi(current_row)
+
+        QMessageBox.information(self, "Edit Mode", f"กำลังแก้ไข component '{name}'\nสามารถแก้ไขค่าในฟอร์มและกด 'Update Component'")
+
+    def cancel_edit(self):
+        """ยกเลิกการแก้ไข"""
+        self.clear_component_form()
+        QMessageBox.information(self, "Cancelled", "ยกเลิกการแก้ไขแล้ว")
+
+    def add_or_update_component(self):
+        """เพิ่มหรืออัพเดท Component"""
         name = self.comp_name_input.text().strip()
         if not name:
             QMessageBox.warning(self, "Warning", "กรุณากรอกชื่อ component")
             return
-
-        # Get ROI from image selector
-        rect = self.image_selector.get_current_rect()
-        if not rect or rect.width() < 10 or rect.height() < 10:
-            QMessageBox.warning(
-                self,
-                "Warning",
-                "กรุณาวาด ROI บนภาพ\n(คลิกและลากเพื่อสร้าง ROI)"
-            )
-            return
-
-        # Add to table
-        row = self.components_table.rowCount()
-        self.components_table.insertRow(row)
 
         position = self.comp_position_input.text().strip()
         comp_type = self.comp_type_combo.currentText()
@@ -578,30 +644,86 @@ class ComponentDefinitionWidget(QWidget):
         confidence = self.confidence_input.value()
         critical = self.critical_checkbox.isChecked()
 
-        self.components_table.setItem(row, 0, QTableWidgetItem(name))
-        self.components_table.setItem(row, 1, QTableWidgetItem(position))
-        self.components_table.setItem(row, 2, QTableWidgetItem(comp_type))
-        self.components_table.setItem(row, 3, QTableWidgetItem(str(tolerance)))
-        self.components_table.setItem(row, 4, QTableWidgetItem(f"{confidence:.2f}"))
-        self.components_table.setItem(row, 5, QTableWidgetItem("✓" if critical else ""))
+        if self.editing_mode:
+            # UPDATE MODE: แก้ไข component ที่มีอยู่
+            row = self.editing_row
 
-        # Add ROI to image
-        colors = [
-            QColor(0, 255, 0), QColor(0, 0, 255), QColor(255, 165, 0),
-            QColor(255, 0, 255), QColor(0, 255, 255)
-        ]
-        color = colors[row % len(colors)]
-        self.image_selector.add_roi(name, rect, color)
+            # อัพเดทข้อมูลใน table
+            self.components_table.setItem(row, 0, QTableWidgetItem(name))
+            self.components_table.setItem(row, 1, QTableWidgetItem(position))
+            self.components_table.setItem(row, 2, QTableWidgetItem(comp_type))
+            self.components_table.setItem(row, 3, QTableWidgetItem(str(tolerance)))
+            self.components_table.setItem(row, 4, QTableWidgetItem(f"{confidence:.2f}"))
+            self.components_table.setItem(row, 5, QTableWidgetItem("✓" if critical else ""))
 
-        # เพิ่ม None ใน component_ids (ยังไม่มี database ID)
-        self.component_ids.append(None)
+            # อัพเดทใน database ถ้ามี component ID
+            if self.editing_component_id is not None:
+                try:
+                    # Get current ROI
+                    roi_data = self.image_selector.rois[row]
+                    rect = roi_data["rect"]
 
-        # Clear inputs
-        self.comp_name_input.clear()
-        self.comp_position_input.clear()
-        self.image_selector.clear_current_rect()
+                    self.comp_manager.update_component_definition(
+                        self.editing_component_id,
+                        component_name=name,
+                        component_type=comp_type,
+                        position_label=position,
+                        roi_x=rect.x(),
+                        roi_y=rect.y(),
+                        roi_width=rect.width(),
+                        roi_height=rect.height(),
+                        tolerance=tolerance,
+                        min_confidence=confidence,
+                        is_critical=critical
+                    )
+                    QMessageBox.information(self, "Success", f"อัพเดท component '{name}' แล้ว")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"ไม่สามารถอัพเดท component:\n{str(e)}")
+                    return
+            else:
+                QMessageBox.information(self, "Success", f"อัพเดท component '{name}' แล้ว (จะบันทึกเมื่อกด Save Product)")
 
-        QMessageBox.information(self, "Success", f"เพิ่ม component '{name}' แล้ว")
+            # ล้างฟอร์มและออกจาก edit mode
+            self.clear_component_form()
+
+        else:
+            # ADD MODE: เพิ่ม component ใหม่
+            # Get ROI from image selector
+            rect = self.image_selector.get_current_rect()
+            if not rect or rect.width() < 10 or rect.height() < 10:
+                QMessageBox.warning(
+                    self,
+                    "Warning",
+                    "กรุณาวาด ROI บนภาพ\n(คลิกและลากเพื่อสร้าง ROI)"
+                )
+                return
+
+            # Add to table
+            row = self.components_table.rowCount()
+            self.components_table.insertRow(row)
+
+            self.components_table.setItem(row, 0, QTableWidgetItem(name))
+            self.components_table.setItem(row, 1, QTableWidgetItem(position))
+            self.components_table.setItem(row, 2, QTableWidgetItem(comp_type))
+            self.components_table.setItem(row, 3, QTableWidgetItem(str(tolerance)))
+            self.components_table.setItem(row, 4, QTableWidgetItem(f"{confidence:.2f}"))
+            self.components_table.setItem(row, 5, QTableWidgetItem("✓" if critical else ""))
+
+            # Add ROI to image
+            colors = [
+                QColor(0, 255, 0), QColor(0, 0, 255), QColor(255, 165, 0),
+                QColor(255, 0, 255), QColor(0, 255, 255)
+            ]
+            color = colors[row % len(colors)]
+            self.image_selector.add_roi(name, rect, color)
+
+            # เพิ่ม None ใน component_ids (ยังไม่มี database ID)
+            self.component_ids.append(None)
+
+            # Clear inputs
+            self.clear_component_form()
+
+            QMessageBox.information(self, "Success", f"เพิ่ม component '{name}' แล้ว")
 
     def remove_component(self):
         """ลบ Component ที่เลือก"""
