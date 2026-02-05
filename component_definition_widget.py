@@ -270,6 +270,21 @@ class ComponentDefinitionWidget(QWidget):
         self.golden_template_path = None
         self.component_ids = []  # เก็บ component IDs จาก database
 
+        # Color mapping for components
+        self.name_to_color_map = {}  # เก็บ mapping ระหว่าง component name กับ color
+        self.color_palette = [
+            QColor(255, 0, 0),      # Red
+            QColor(0, 0, 255),      # Blue
+            QColor(255, 165, 0),    # Orange
+            QColor(255, 0, 255),    # Magenta
+            QColor(0, 255, 255),    # Cyan
+            QColor(0, 255, 0),      # Green
+            QColor(255, 255, 0),    # Yellow
+            QColor(128, 0, 128),    # Purple
+            QColor(255, 192, 203),  # Pink
+            QColor(165, 42, 42),    # Brown
+        ]
+
         # Edit mode tracking
         self.editing_mode = False
         self.editing_row = None
@@ -544,6 +559,26 @@ class ComponentDefinitionWidget(QWidget):
         panel.setLayout(layout)
         return panel
 
+    def _get_color_for_name(self, component_name: str) -> QColor:
+        """
+        ดึงสีสำหรับ component name
+        component ชื่อเดียวกัน → ใช้สีเดียวกัน
+        component ชื่อต่างกัน → ใช้สีต่างกัน
+        """
+        # ถ้ามี mapping แล้ว ใช้สีเดิม
+        if component_name in self.name_to_color_map:
+            return self.name_to_color_map[component_name]
+
+        # ถ้ายังไม่มี assign สีใหม่
+        # ใช้ index ของ unique names ที่มีอยู่แล้ว
+        color_index = len(self.name_to_color_map) % len(self.color_palette)
+        color = self.color_palette[color_index]
+
+        # บันทึก mapping
+        self.name_to_color_map[component_name] = color
+
+        return color
+
     def browse_golden_template(self):
         """เลือกไฟล์ Golden Template"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -627,31 +662,26 @@ class ComponentDefinitionWidget(QWidget):
         self.components_table.setRowCount(len(components))
         self.image_selector.clear_all_rois()
         self.component_ids = []  # รีเซ็ต component IDs
-
-        colors = [
-            QColor(0, 255, 0),    # Green
-            QColor(0, 0, 255),    # Blue
-            QColor(255, 165, 0),  # Orange
-            QColor(255, 0, 255),  # Magenta
-            QColor(0, 255, 255),  # Cyan
-        ]
+        self.name_to_color_map = {}  # รีเซ็ต color mapping เมื่อโหลด product ใหม่
 
         for i, comp in enumerate(components):
             # เก็บ component ID
             self.component_ids.append(comp['id'])
 
-            self.components_table.setItem(i, 0, QTableWidgetItem(comp['name']))
+            comp_name = comp['name']
+
+            self.components_table.setItem(i, 0, QTableWidgetItem(comp_name))
             self.components_table.setItem(i, 1, QTableWidgetItem(comp.get('position', '')))
             self.components_table.setItem(i, 2, QTableWidgetItem(comp['type']))
             self.components_table.setItem(i, 3, QTableWidgetItem(str(comp.get('tolerance', 50))))
             self.components_table.setItem(i, 4, QTableWidgetItem(f"{comp['min_confidence']:.2f}"))
             self.components_table.setItem(i, 5, QTableWidgetItem("✓" if comp['critical'] else ""))
 
-            # Add ROI to image
+            # Add ROI to image with name-based color
             roi = comp['roi']
             rect = QRect(roi['x'], roi['y'], roi['width'], roi['height'])
-            color = colors[i % len(colors)]
-            self.image_selector.add_roi(comp['name'], rect, color)
+            color = self._get_color_for_name(comp_name)  # ใช้สีตาม component name
+            self.image_selector.add_roi(comp_name, rect, color)
 
     def create_new_product(self):
         """สร้าง Product ใหม่"""
@@ -696,6 +726,7 @@ class ComponentDefinitionWidget(QWidget):
         self.golden_template_path = None
         self.template_path_label.setText("ยังไม่ได้เลือกภาพ")
         self.component_ids = []  # ล้าง component IDs
+        self.name_to_color_map = {}  # รีเซ็ต color mapping
 
     def clear_component_form(self):
         """ล้างฟอร์ม component เท่านั้น"""
@@ -841,12 +872,8 @@ class ComponentDefinitionWidget(QWidget):
             self.components_table.setItem(row, 4, QTableWidgetItem(f"{confidence:.2f}"))
             self.components_table.setItem(row, 5, QTableWidgetItem("✓" if critical else ""))
 
-            # Add ROI to image
-            colors = [
-                QColor(0, 255, 0), QColor(0, 0, 255), QColor(255, 165, 0),
-                QColor(255, 0, 255), QColor(0, 255, 255)
-            ]
-            color = colors[row % len(colors)]
+            # Add ROI to image with name-based color
+            color = self._get_color_for_name(name)  # ใช้สีตาม component name
             self.image_selector.add_roi(name, rect, color)
 
             # เพิ่ม None ใน component_ids (ยังไม่มี database ID)
