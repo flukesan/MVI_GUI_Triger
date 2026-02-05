@@ -139,6 +139,10 @@ class MVIComponentIntegration:
         """
         เทียบ expected vs detected
 
+        ⚠️ แก้ไข: เพิ่มการ track detection ที่ match แล้ว
+        เพื่อป้องกัน detection ตัวเดียวถูก match กับ expected หลายตัว
+        (สำคัญสำหรับ component ชื่อเดียวกันหลายตำแหน่ง เช่น screw ที่ left/center/right)
+
         Returns:
             List of {
                 "component_def_id": int,
@@ -154,15 +158,20 @@ class MVIComponentIntegration:
         """
 
         results = []
+        matched_detection_indices = set()  # เก็บ index ของ detection ที่ match แล้ว
 
         for expected in expected_components:
-            # หา detected object ที่ match
-            matched = self._find_matching_object(
+            # หา detected object ที่ match (ยกเว้นที่ match ไปแล้ว)
+            matched, matched_idx = self._find_matching_object(
                 expected,
-                mvi_detections
+                mvi_detections,
+                matched_detection_indices
             )
 
             if matched:
+                # Mark detection นี้ว่า match แล้ว
+                matched_detection_indices.add(matched_idx)
+
                 results.append({
                     "component_def_id": expected["id"],
                     "name": expected["name"],
@@ -200,33 +209,54 @@ class MVIComponentIntegration:
 
     def _find_matching_object(self,
                              expected: Dict,
-                             detections: List[Dict]) -> Optional[Dict]:
+                             detections: List[Dict],
+                             matched_indices: set = None) -> Tuple[Optional[Dict], Optional[int]]:
         """
         หา detected object ที่ตรงกับ expected
 
+        ⚠️ แก้ไข: เพิ่มการตรวจสอบ matched_indices เพื่อป้องกัน detection ซ้ำ
+
         Matching criteria (in order of priority):
         1. Class name ต้องตรงกัน (partial match)
-        2. IoU > 10% (primary - ยืดหยุ่นกับการวางที่คลาดเคลื่อน)
+        2. IoU > 5% (primary - ยืดหยุ่นกับการวางที่คลาดเคลื่อน)
         3. Center distance < tolerance (fallback)
+
+        Args:
+            expected: Expected component definition
+            detections: List of MVI detections
+            matched_indices: Set of detection indices that are already matched
+
+        Returns:
+            Tuple of (matched_detection, matched_index) or (None, None)
         """
+
+        if matched_indices is None:
+            matched_indices = set()
 
         expected_center = self._calculate_center(expected["roi"])
         tolerance = expected.get("tolerance", 50)
         min_iou = 0.05  # ยอมรับถ้ากรอบทับกันอย่างน้อย 5% (ยืดหยุ่นกับการวางคลาดเคลื่อน)
 
         best_match = None
+        best_match_idx = None
         best_score = 0.0  # IoU score หรือ 1/distance
 
-        print(f"\n  🔍 Matching '{expected['name']}':")
+        print(f"\n  🔍 Matching '{expected['name']}' at position '{expected.get('position', 'N/A')}':")
         print(f"     Expected: center={expected_center}, size={expected['roi']['width']}x{expected['roi']['height']}")
         print(f"     Matching: IoU>{min_iou*100:.0f}% OR distance<{tolerance}px")
+        print(f"     Already matched detections: {matched_indices}")
 
-        for detection in detections:
+        for idx, detection in enumerate(detections):
+            # ข้าม detection ที่ match ไปแล้ว
+            if idx in matched_indices:
+                print(f"\n     Skipping detection[{idx}]: '{detection['class']}' (already matched)")
+                continue
+
             # เช็ค class name (case insensitive + partial match)
             detected_class = detection["class"].lower()
             expected_class = expected["name"].lower()
 
-            print(f"\n     Checking: '{detection['class']}' (confidence: {detection['confidence']:.2f})")
+            print(f"\n     Checking detection[{idx}]: '{detection['class']}' (confidence: {detection['confidence']:.2f})")
 
             # Check if expected class is contained in detected class or vice versa
             # This handles cases like "Pig Inspection" matching "pig"
@@ -248,6 +278,7 @@ class MVIComponentIntegration:
                 # Match by IoU - ยืดหยุ่นมาก เหมาะกับการวางที่คลาดเคลื่อน
                 if iou > best_score:
                     best_match = detection
+                    best_match_idx = idx
                     best_score = iou
                     print(f"       ✅ MATCH by IoU! (best so far: {iou:.3f})")
                 continue
@@ -262,15 +293,16 @@ class MVIComponentIntegration:
                 score = 1.0 / (distance + 1)  # ยิ่งใกล้ยิ่งดี
                 if score > best_score:
                     best_match = detection
+                    best_match_idx = idx
                     best_score = score
                     print(f"       ✅ MATCH by distance! (best so far: {distance:.1f}px)")
 
         if best_match:
-            print(f"     ✅ Found best match: {best_match['class']}")
+            print(f"     ✅ Found best match: detection[{best_match_idx}] = {best_match['class']}")
         else:
             print(f"     ❌ No match found (all detections failed IoU and distance check)")
 
-        return best_match
+        return best_match, best_match_idx
 
     def _calculate_center(self, bbox: Dict) -> Tuple[float, float]:
         """คำนวณจุดกึ่งกลาง bbox"""
