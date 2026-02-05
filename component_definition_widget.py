@@ -48,7 +48,9 @@ class ImageROISelector(QLabel):
 
         self.original_pixmap = None
         self.original_size = None  # เก็บขนาดภาพจริง
+        self.scaled_pixmap = None  # เก็บ pixmap ที่ scale แล้ว
         self.scale_factor = 1.0    # อัตราส่วนการ scale
+        self.image_offset = QPoint(0, 0)  # offset ของภาพใน QLabel
         self.drawing = False
         self.start_point = None
         self.current_rect = None
@@ -71,9 +73,17 @@ class ImageROISelector(QLabel):
                 Qt.TransformationMode.SmoothTransformation
             )
 
+            self.scaled_pixmap = scaled
+
             # คำนวณ scale factor
             if self.original_size:
                 self.scale_factor = scaled.width() / self.original_size.width()
+
+            # คำนวณ offset ของภาพใน QLabel (เพราะ alignment เป็น center)
+            self.image_offset = QPoint(
+                (self.width() - scaled.width()) // 2,
+                (self.height() - scaled.height()) // 2
+            )
 
             # Draw ROIs
             painter = QPainter(scaled)
@@ -109,17 +119,43 @@ class ImageROISelector(QLabel):
         else:
             self.setText("📷 โหลดภาพ Golden Template\n(คลิก 'Browse...' ด้านล่าง)")
 
+    def _widget_pos_to_image_pos(self, widget_pos):
+        """แปลงตำแหน่งจาก widget coordinates เป็น image coordinates (บน scaled pixmap)"""
+        # ลบ offset ของภาพออก
+        image_pos = widget_pos - self.image_offset
+        return image_pos
+
+    def _is_pos_on_image(self, widget_pos):
+        """ตรวจสอบว่าตำแหน่งอยู่บนภาพหรือไม่"""
+        if not self.scaled_pixmap:
+            return False
+
+        image_pos = self._widget_pos_to_image_pos(widget_pos)
+        return (0 <= image_pos.x() < self.scaled_pixmap.width() and
+                0 <= image_pos.y() < self.scaled_pixmap.height())
+
     def mousePressEvent(self, event):
         """เริ่มวาด ROI"""
         if self.original_pixmap and event.button() == Qt.MouseButton.LeftButton:
-            self.drawing = True
-            self.start_point = event.pos()
-            self.current_rect = QRect(self.start_point, self.start_point)
+            # ตรวจสอบว่าคลิกบนภาพหรือไม่
+            if self._is_pos_on_image(event.pos()):
+                self.drawing = True
+                # แปลงจาก widget coordinates เป็น image coordinates
+                self.start_point = self._widget_pos_to_image_pos(event.pos())
+                self.current_rect = QRect(self.start_point, self.start_point)
 
     def mouseMoveEvent(self, event):
         """วาด ROI ขณะเลื่อนเมาส์"""
         if self.drawing:
-            self.current_rect = QRect(self.start_point, event.pos()).normalized()
+            # แปลงจาก widget coordinates เป็น image coordinates
+            current_pos = self._widget_pos_to_image_pos(event.pos())
+
+            # จำกัดให้อยู่ในขอบเขตของภาพ
+            if self.scaled_pixmap:
+                current_pos.setX(max(0, min(current_pos.x(), self.scaled_pixmap.width())))
+                current_pos.setY(max(0, min(current_pos.y(), self.scaled_pixmap.height())))
+
+            self.current_rect = QRect(self.start_point, current_pos).normalized()
             self.update_display()
 
     def mouseReleaseEvent(self, event):
