@@ -20,18 +20,20 @@ try:
         QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
         QLineEdit, QComboBox, QGroupBox, QGridLayout, QTableWidget,
         QTableWidgetItem, QMessageBox, QFileDialog, QSpinBox,
-        QDoubleSpinBox, QCheckBox, QTextEdit, QSplitter, QFrame
+        QDoubleSpinBox, QCheckBox, QTextEdit, QSplitter, QFrame,
+        QScrollArea
     )
-    from PyQt6.QtCore import Qt, QPoint, QRect
+    from PyQt6.QtCore import Qt, QPoint, QRect, QSize
     from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
 except ImportError:
     from PySide6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
         QLineEdit, QComboBox, QGroupBox, QGridLayout, QTableWidget,
         QTableWidgetItem, QMessageBox, QFileDialog, QSpinBox,
-        QDoubleSpinBox, QCheckBox, QTextEdit, QSplitter, QFrame
+        QDoubleSpinBox, QCheckBox, QTextEdit, QSplitter, QFrame,
+        QScrollArea
     )
-    from PySide6.QtCore import Qt, QPoint, QRect
+    from PySide6.QtCore import Qt, QPoint, QRect, QSize
     from PySide6.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QFont
 
 from component_definition import ComponentDefinitionManager
@@ -42,14 +44,15 @@ class ImageROISelector(QLabel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # ไม่ใช้ AlignCenter เพราะจะใช้ fixed size แทน
         self.setMinimumSize(600, 400)
-        self.setStyleSheet("border: 2px solid #cccccc; background-color: #f5f5f5;")
+        self.setStyleSheet("background-color: #f5f5f5;")
 
         self.original_pixmap = None
         self.original_size = None  # เก็บขนาดภาพจริง
         self.scaled_pixmap = None  # เก็บ pixmap ที่ scale แล้ว
         self.scale_factor = 1.0    # อัตราส่วนการ scale
+        self.zoom_level = 1.0      # ระดับการซูม (1.0 = 100%)
         self.image_offset = QPoint(0, 0)  # offset ของภาพใน QLabel
         self.drawing = False
         self.start_point = None
@@ -66,24 +69,29 @@ class ImageROISelector(QLabel):
     def update_display(self):
         """อัพเดทการแสดงผล"""
         if self.original_pixmap:
-            # Scale to fit widget
+            # คำนวณขนาดภาพหลังจาก zoom
+            zoomed_width = int(self.original_size.width() * self.zoom_level)
+            zoomed_height = int(self.original_size.height() * self.zoom_level)
+
+            # Scale ภาพตาม zoom level
             scaled = self.original_pixmap.scaled(
-                self.size(),
+                zoomed_width,
+                zoomed_height,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
 
             self.scaled_pixmap = scaled
 
-            # คำนวณ scale factor
+            # ตั้งขนาด QLabel ให้เท่ากับภาพ (ไม่มี offset)
+            self.setFixedSize(scaled.size())
+
+            # คำนวณ scale factor (รวม zoom level)
             if self.original_size:
                 self.scale_factor = scaled.width() / self.original_size.width()
 
-            # คำนวณ offset ของภาพใน QLabel (เพราะ alignment เป็น center)
-            self.image_offset = QPoint(
-                (self.width() - scaled.width()) // 2,
-                (self.height() - scaled.height()) // 2
-            )
+            # ไม่ต้องคำนวณ offset เพราะภาพ fill เต็ม label
+            self.image_offset = QPoint(0, 0)
 
             # Draw ROIs
             painter = QPainter(scaled)
@@ -225,6 +233,32 @@ class ImageROISelector(QLabel):
         super().resizeEvent(event)
         self.update_display()
 
+    def zoom_in(self):
+        """ซูมเข้า"""
+        if self.zoom_level < 5.0:  # จำกัดสูงสุดที่ 500%
+            self.zoom_level = min(5.0, self.zoom_level + 0.25)
+            self.update_display()
+            return self.zoom_level
+        return None
+
+    def zoom_out(self):
+        """ซูมออก"""
+        if self.zoom_level > 0.25:  # จำกัดต่ำสุดที่ 25%
+            self.zoom_level = max(0.25, self.zoom_level - 0.25)
+            self.update_display()
+            return self.zoom_level
+        return None
+
+    def zoom_reset(self):
+        """รีเซ็ตซูมเป็น 100%"""
+        self.zoom_level = 1.0
+        self.update_display()
+        return self.zoom_level
+
+    def get_zoom_percentage(self):
+        """ดึงค่าเปอร์เซ็นต์ซูม"""
+        return int(self.zoom_level * 100)
+
 
 class ComponentDefinitionWidget(QWidget):
     """Widget หลักสำหรับ Component Definition"""
@@ -279,9 +313,46 @@ class ComponentDefinitionWidget(QWidget):
         template_group = QGroupBox("Golden Template")
         template_layout = QVBoxLayout()
 
+        # Zoom controls
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("🔍 Zoom:"))
+
+        self.zoom_out_btn = QPushButton("➖")
+        self.zoom_out_btn.setFixedWidth(40)
+        self.zoom_out_btn.setToolTip("Zoom Out (25% steps)")
+        self.zoom_out_btn.clicked.connect(self.on_zoom_out)
+        zoom_layout.addWidget(self.zoom_out_btn)
+
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setStyleSheet("font-weight: bold; min-width: 50px; text-align: center;")
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        zoom_layout.addWidget(self.zoom_label)
+
+        self.zoom_in_btn = QPushButton("➕")
+        self.zoom_in_btn.setFixedWidth(40)
+        self.zoom_in_btn.setToolTip("Zoom In (25% steps)")
+        self.zoom_in_btn.clicked.connect(self.on_zoom_in)
+        zoom_layout.addWidget(self.zoom_in_btn)
+
+        self.zoom_reset_btn = QPushButton("🔄 Reset")
+        self.zoom_reset_btn.setToolTip("Reset to 100%")
+        self.zoom_reset_btn.clicked.connect(self.on_zoom_reset)
+        zoom_layout.addWidget(self.zoom_reset_btn)
+
+        zoom_layout.addStretch()
+        template_layout.addLayout(zoom_layout)
+
+        # Scroll area for image
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(False)  # ให้ scroll ตามขนาดภาพจริง
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("QScrollArea { border: 2px solid #cccccc; background-color: #f5f5f5; }")
+
         # Image display
         self.image_selector = ImageROISelector()
-        template_layout.addWidget(self.image_selector)
+        scroll_area.setWidget(self.image_selector)
+        template_layout.addWidget(scroll_area)
 
         # Browse button
         browse_layout = QHBoxLayout()
@@ -299,9 +370,11 @@ class ComponentDefinitionWidget(QWidget):
         instructions = QLabel(
             "💡 วิธีใช้:\n"
             "1. โหลด Golden Template\n"
-            "2. กรอกชื่อ component\n"
-            "3. คลิกและลาก เพื่อวาด ROI บนภาพ\n"
-            "4. คลิก 'Add Component'"
+            "2. ใช้ Zoom (➕/➖) สำหรับวัตถุขนาดเล็ก\n"
+            "3. กรอกชื่อ component\n"
+            "4. คลิกและลาก เพื่อวาด ROI บนภาพ\n"
+            "5. คลิก 'Add Component'\n\n"
+            "🔍 Zoom: 25% - 500% (เลื่อนดูได้เมื่อซูม)"
         )
         instructions.setStyleSheet("background-color: #e8f4f8; padding: 10px; border-radius: 5px;")
         layout.addWidget(instructions)
@@ -484,6 +557,29 @@ class ComponentDefinitionWidget(QWidget):
             self.golden_template_path = file_path
             self.template_path_label.setText(os.path.basename(file_path))
             self.image_selector.load_image(file_path)
+            self.update_zoom_label()
+
+    def on_zoom_in(self):
+        """ซูมเข้า"""
+        level = self.image_selector.zoom_in()
+        if level:
+            self.update_zoom_label()
+
+    def on_zoom_out(self):
+        """ซูมออก"""
+        level = self.image_selector.zoom_out()
+        if level:
+            self.update_zoom_label()
+
+    def on_zoom_reset(self):
+        """รีเซ็ตซูม"""
+        self.image_selector.zoom_reset()
+        self.update_zoom_label()
+
+    def update_zoom_label(self):
+        """อัพเดท label แสดงเปอร์เซ็นต์ซูม"""
+        zoom_pct = self.image_selector.get_zoom_percentage()
+        self.zoom_label.setText(f"{zoom_pct}%")
 
     def load_products(self):
         """โหลดรายการ Products"""
