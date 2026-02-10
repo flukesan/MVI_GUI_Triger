@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "USB Camera 1": {
+      "type": "usb",
+      "source": 0,
+      "width": 1280,
+      "height": 720,
+      "fps": 30
+    }
+  },
+  "active_profile": "USB Camera 1"
+}

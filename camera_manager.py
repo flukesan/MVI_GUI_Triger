@@ -1,27 +1,31 @@
 """
 Camera Manager for Dual Mode Inspection System
-จัดการกล้อง USB, IP Camera (RTSP), GigE Vision, และ Image File
-รองรับทั้ง Capture Mode และ Realtime Mode
+จัดการกล้อง USB, RTSP/IP Camera, GigE Vision, และ Image File
+ใช้ Backend Pattern รองรับทั้ง Capture Mode และ Realtime Mode
+
+Based on yolo_inspection_system camera_manager + camera_backends
 """
 import time
 import cv2
 import numpy as np
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, List, Union, Any
 
 try:
     from PyQt6.QtCore import QObject, QThread, pyqtSignal as Signal
 except ImportError:
     from PySide6.QtCore import QObject, QThread, Signal
 
+from camera_backends import BaseCameraBackend, OpenCVBackend, GigEBackend
+
 
 class CameraStreamWorker(QThread):
     """Worker thread สำหรับดึงเฟรมจากกล้องแบบต่อเนื่อง (Realtime Mode)"""
     frame_ready = Signal(int, object)  # (camera_id, numpy frame)
 
-    def __init__(self, camera_id: int, capture: cv2.VideoCapture, target_fps: int = 30):
+    def __init__(self, camera_id: int, backend: BaseCameraBackend, target_fps: int = 30):
         super().__init__()
         self.camera_id = camera_id
-        self.capture = capture
+        self.backend = backend
         self.target_fps = target_fps
         self.running = False
 
@@ -29,9 +33,9 @@ class CameraStreamWorker(QThread):
         self.running = True
         interval = 1.0 / max(self.target_fps, 1)
         while self.running:
-            if self.capture and self.capture.isOpened():
-                ret, frame = self.capture.read()
-                if ret:
+            if self.backend and self.backend.is_connected():
+                frame = self.backend.get_frame()
+                if frame is not None:
                     self.frame_ready.emit(self.camera_id, frame)
                 else:
                     time.sleep(0.01)
@@ -45,7 +49,13 @@ class CameraStreamWorker(QThread):
 
 
 class CameraManager(QObject):
-    """จัดการกล้อง — รองรับ USB, RTSP, GigE Vision, Image File"""
+    """จัดการกล้อง — รองรับ USB, RTSP, GigE Vision, Image File (ใช้ Backend Pattern)"""
+
+    # Camera type constants
+    TYPE_USB = "usb"
+    TYPE_RTSP = "rtsp"
+    TYPE_IP = "ip"
+    TYPE_GIGE = "gige"
 
     # Signals
     frame_captured = Signal(int, object)    # (camera_id, numpy frame)
@@ -60,82 +70,84 @@ class CameraManager(QObject):
 
     # ─── Camera Lifecycle ───
 
-    def open_camera(self, camera_id: int, source: Union[int, str],
-                    cam_type: str = "auto", resolution: tuple = None) -> bool:
+    def open_camera(self, camera_id: int, camera_type: str = TYPE_USB,
+                    source: Any = 0, width: int = 1280, height: int = 720,
+                    fps: int = 30, **kwargs) -> bool:
         """
         เปิดกล้อง
-        source: int (USB index: 0,1,2), str ("rtsp://..." หรือ IP address สำหรับ GigE)
-        cam_type: "usb", "rtsp", "gige", หรือ "auto"
-        resolution: (width, height) ตั้งค่าความละเอียด
+
+        Args:
+            camera_id: ID ของกล้อง (0, 1, ...)
+            camera_type: "usb", "rtsp", "ip", "gige"
+            source: USB index / RTSP URL / GigE dict
+            width, height, fps: Resolution and FPS
+            **kwargs: exposure, gain, exposure_time, gentl_path, camera_id
         """
         try:
-            # ปิดกล้องเก่าถ้ามี
             if camera_id in self.cameras:
                 self.close_camera(camera_id)
 
-            cap = self._create_capture(source, cam_type)
-            if cap is None or not cap.isOpened():
-                self.camera_error.emit(camera_id, f"Cannot open camera: {source}")
+            # Create appropriate backend
+            backend = self._create_backend(camera_type)
+            if backend is None:
+                self.camera_error.emit(camera_id, f"Cannot create backend for type: {camera_type}")
                 return False
 
-            if resolution:
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
+            success = backend.connect(source, width, height, fps, **kwargs)
+            if not success:
+                self.camera_error.emit(camera_id, f"Cannot connect to camera: {source}")
+                return False
 
             self.cameras[camera_id] = {
-                "cap": cap,
+                "backend": backend,
+                "type": camera_type,
                 "source": source,
-                "type": cam_type,
                 "is_open": True
             }
 
             self.camera_opened.emit(camera_id)
-            print(f"Camera {camera_id} opened: {source} (type={cam_type})")
+            print(f"Camera {camera_id} opened: {source} (type={camera_type})")
             return True
 
         except Exception as e:
             self.camera_error.emit(camera_id, str(e))
             return False
 
-    def _create_capture(self, source: Union[int, str], cam_type: str) -> Optional[cv2.VideoCapture]:
-        """สร้าง VideoCapture ตาม camera type"""
-        if cam_type == "gige" and isinstance(source, str):
-            # GigE Vision — ลอง GStreamer pipeline ก่อน
-            gst_pipeline = (
-                f"tcpclientsrc host={source} ! decodebin ! videoconvert ! appsink"
-            )
-            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                return cap
-            # Fallback: ใช้ IP ตรง (บาง GigE driver รองรับ)
-            cap = cv2.VideoCapture(source)
-            if cap.isOpened():
-                return cap
+    def _create_backend(self, camera_type: str) -> Optional[BaseCameraBackend]:
+        """สร้าง backend ตาม camera type"""
+        camera_type = camera_type.lower()
+
+        if camera_type in [self.TYPE_USB, self.TYPE_RTSP, self.TYPE_IP]:
+            return OpenCVBackend()
+        elif camera_type == self.TYPE_GIGE:
+            try:
+                return GigEBackend()
+            except RuntimeError as e:
+                print(f"GigE backend error: {e}")
+                return None
+        else:
+            print(f"Unsupported camera type: {camera_type}")
             return None
-        else:
-            return cv2.VideoCapture(source)
 
-    def open_camera_from_config(self, camera_id: int, cam_config: dict) -> bool:
-        """เปิดกล้องจาก config dict (ใช้ร่วมกับ CameraSettingsWidget)"""
-        cam_type = cam_config.get("type", "usb")
-        width = cam_config.get("width", 1280)
-        height = cam_config.get("height", 720)
+    def connect_from_profile(self, camera_id: int, profile: dict) -> bool:
+        """
+        เชื่อมต่อกล้องจาก Camera Profile dict
+        (ใช้ร่วมกับ CameraProfilesDialog)
+        """
+        cam_type = profile.get("type", "usb")
+        source = profile.get("source", 0)
+        width = profile.get("width", 1280)
+        height = profile.get("height", 720)
+        fps = profile.get("fps", 30)
 
-        if cam_type == "usb":
-            source = cam_config.get("index", 0)
-        elif cam_type == "rtsp":
-            source = cam_config.get("url", "")
-            user = cam_config.get("username", "")
-            pwd = cam_config.get("password", "")
-            if user and pwd and "@" not in source.split("//")[-1]:
-                protocol, rest = source.split("://", 1)
-                source = f"{protocol}://{user}:{pwd}@{rest}"
-        elif cam_type == "gige":
-            source = cam_config.get("ip", "")
-        else:
-            source = cam_config.get("index", 0)
+        kwargs = {}
+        if profile.get("exposure", 0) > 0:
+            kwargs["exposure"] = profile["exposure"]
+            kwargs["exposure_time"] = profile["exposure"]  # สำหรับ GigE
+        if profile.get("gain", 0) > 0:
+            kwargs["gain"] = profile["gain"]
 
-        return self.open_camera(camera_id, source, cam_type, (width, height))
+        return self.open_camera(camera_id, cam_type, source, width, height, fps, **kwargs)
 
     def close_camera(self, camera_id: int):
         """ปิดกล้อง"""
@@ -143,8 +155,9 @@ class CameraManager(QObject):
 
         if camera_id in self.cameras:
             cam = self.cameras[camera_id]
-            if cam["cap"]:
-                cam["cap"].release()
+            backend = cam.get("backend")
+            if backend:
+                backend.disconnect()
             del self.cameras[camera_id]
             self.camera_closed.emit(camera_id)
             print(f"Camera {camera_id} closed")
@@ -157,7 +170,8 @@ class CameraManager(QObject):
     def is_opened(self, camera_id: int) -> bool:
         """ตรวจสอบว่ากล้องเปิดอยู่หรือไม่"""
         if camera_id in self.cameras:
-            return self.cameras[camera_id]["cap"].isOpened()
+            backend = self.cameras[camera_id].get("backend")
+            return backend is not None and backend.is_connected()
         return False
 
     # ─── Capture Mode (ถ่ายทีละภาพ) ───
@@ -168,13 +182,13 @@ class CameraManager(QObject):
             self.camera_error.emit(camera_id, "Camera not opened")
             return None
 
-        cap = self.cameras[camera_id]["cap"]
-        if not cap.isOpened():
+        backend = self.cameras[camera_id].get("backend")
+        if backend is None or not backend.is_connected():
             self.camera_error.emit(camera_id, "Camera not available")
             return None
 
-        ret, frame = cap.read()
-        if ret:
+        frame = backend.get_frame()
+        if frame is not None:
             self.frame_captured.emit(camera_id, frame)
             return frame
         else:
@@ -191,8 +205,8 @@ class CameraManager(QObject):
 
         self.stop_stream(camera_id)
 
-        cap = self.cameras[camera_id]["cap"]
-        worker = CameraStreamWorker(camera_id, cap, fps)
+        backend = self.cameras[camera_id].get("backend")
+        worker = CameraStreamWorker(camera_id, backend, fps)
         worker.frame_ready.connect(self._on_stream_frame)
         self.stream_workers[camera_id] = worker
         worker.start()
@@ -226,25 +240,25 @@ class CameraManager(QObject):
     # ─── Utilities ───
 
     def set_resolution(self, camera_id: int, width: int, height: int):
-        """ตั้งความละเอียด"""
+        """ตั้งความละเอียด (สำหรับ OpenCV backend)"""
         if camera_id in self.cameras:
-            cap = self.cameras[camera_id]["cap"]
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            backend = self.cameras[camera_id].get("backend")
+            if isinstance(backend, OpenCVBackend) and backend.cap:
+                backend.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                backend.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
     def get_camera_info(self, camera_id: int) -> Optional[dict]:
         """ข้อมูลกล้อง"""
         if camera_id not in self.cameras:
             return None
 
-        cap = self.cameras[camera_id]["cap"]
-        return {
-            "source": self.cameras[camera_id]["source"],
-            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            "fps": cap.get(cv2.CAP_PROP_FPS),
-            "is_streaming": self.is_streaming(camera_id)
-        }
+        backend = self.cameras[camera_id].get("backend")
+        if backend:
+            info = backend.get_info()
+            info['camera_type'] = self.cameras[camera_id].get("type")
+            info['is_streaming'] = self.is_streaming(camera_id)
+            return info
+        return None
 
     @staticmethod
     def list_available_cameras(max_check: int = 5) -> List[int]:
