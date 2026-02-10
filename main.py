@@ -202,6 +202,9 @@ class InspectionGUI(QMainWindow):
         self.camera_settings_widget.connect_requested.connect(self.on_connect_from_profile)
         self.tabs.addTab(self.camera_settings_widget, "Camera Settings")
 
+        # Update active profile label now that widget is ready
+        self._update_active_profile_label()
+
         # Component Definition Tab
         if COMPONENT_DEF_AVAILABLE:
             self.component_def_widget = ComponentDefinitionWidget()
@@ -242,7 +245,6 @@ class InspectionGUI(QMainWindow):
         self.active_profile_label = QLabel("No profile")
         self.active_profile_label.setStyleSheet("color: #495057; font-size: 11px;")
         cam_layout.addWidget(self.active_profile_label)
-        self._update_active_profile_label()
 
         # Open Profiles button
         self.open_profiles_btn = QPushButton("Camera Profiles...")
