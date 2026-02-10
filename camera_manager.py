@@ -1,6 +1,6 @@
 """
 Camera Manager for Dual Mode Inspection System
-จัดการกล้อง USB, IP Camera (RTSP), และ Image File
+จัดการกล้อง USB, IP Camera (RTSP), GigE Vision, และ Image File
 รองรับทั้ง Capture Mode และ Realtime Mode
 """
 import time
@@ -45,7 +45,7 @@ class CameraStreamWorker(QThread):
 
 
 class CameraManager(QObject):
-    """จัดการกล้อง — รองรับ USB, RTSP, Image File"""
+    """จัดการกล้อง — รองรับ USB, RTSP, GigE Vision, Image File"""
 
     # Signals
     frame_captured = Signal(int, object)    # (camera_id, numpy frame)
@@ -60,34 +60,82 @@ class CameraManager(QObject):
 
     # ─── Camera Lifecycle ───
 
-    def open_camera(self, camera_id: int, source: Union[int, str]) -> bool:
+    def open_camera(self, camera_id: int, source: Union[int, str],
+                    cam_type: str = "auto", resolution: tuple = None) -> bool:
         """
         เปิดกล้อง
-        source: int (USB index: 0,1,2) หรือ str ("rtsp://..." สำหรับ IP Camera)
+        source: int (USB index: 0,1,2), str ("rtsp://..." หรือ IP address สำหรับ GigE)
+        cam_type: "usb", "rtsp", "gige", หรือ "auto"
+        resolution: (width, height) ตั้งค่าความละเอียด
         """
         try:
             # ปิดกล้องเก่าถ้ามี
             if camera_id in self.cameras:
                 self.close_camera(camera_id)
 
-            cap = cv2.VideoCapture(source)
-            if not cap.isOpened():
+            cap = self._create_capture(source, cam_type)
+            if cap is None or not cap.isOpened():
                 self.camera_error.emit(camera_id, f"Cannot open camera: {source}")
                 return False
+
+            if resolution:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
 
             self.cameras[camera_id] = {
                 "cap": cap,
                 "source": source,
+                "type": cam_type,
                 "is_open": True
             }
 
             self.camera_opened.emit(camera_id)
-            print(f"Camera {camera_id} opened: {source}")
+            print(f"Camera {camera_id} opened: {source} (type={cam_type})")
             return True
 
         except Exception as e:
             self.camera_error.emit(camera_id, str(e))
             return False
+
+    def _create_capture(self, source: Union[int, str], cam_type: str) -> Optional[cv2.VideoCapture]:
+        """สร้าง VideoCapture ตาม camera type"""
+        if cam_type == "gige" and isinstance(source, str):
+            # GigE Vision — ลอง GStreamer pipeline ก่อน
+            gst_pipeline = (
+                f"tcpclientsrc host={source} ! decodebin ! videoconvert ! appsink"
+            )
+            cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                return cap
+            # Fallback: ใช้ IP ตรง (บาง GigE driver รองรับ)
+            cap = cv2.VideoCapture(source)
+            if cap.isOpened():
+                return cap
+            return None
+        else:
+            return cv2.VideoCapture(source)
+
+    def open_camera_from_config(self, camera_id: int, cam_config: dict) -> bool:
+        """เปิดกล้องจาก config dict (ใช้ร่วมกับ CameraSettingsWidget)"""
+        cam_type = cam_config.get("type", "usb")
+        width = cam_config.get("width", 1280)
+        height = cam_config.get("height", 720)
+
+        if cam_type == "usb":
+            source = cam_config.get("index", 0)
+        elif cam_type == "rtsp":
+            source = cam_config.get("url", "")
+            user = cam_config.get("username", "")
+            pwd = cam_config.get("password", "")
+            if user and pwd and "@" not in source.split("//")[-1]:
+                protocol, rest = source.split("://", 1)
+                source = f"{protocol}://{user}:{pwd}@{rest}"
+        elif cam_type == "gige":
+            source = cam_config.get("ip", "")
+        else:
+            source = cam_config.get("index", 0)
+
+        return self.open_camera(camera_id, source, cam_type, (width, height))
 
     def close_camera(self, camera_id: int):
         """ปิดกล้อง"""

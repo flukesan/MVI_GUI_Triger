@@ -1,11 +1,23 @@
 {
   "camera": {
     "sources": {
-      "cam1": {"type": "usb", "index": 0, "label": "Camera 1"},
-      "cam2": {"type": "usb", "index": 1, "label": "Camera 2"}
-    },
-    "resolution": {"width": 1280, "height": 720},
-    "stream_fps": 30
+      "cam1": {
+        "type": "usb",
+        "index": 0,
+        "label": "Camera 1",
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      },
+      "cam2": {
+        "type": "usb",
+        "index": 1,
+        "label": "Camera 2",
+        "width": 1280,
+        "height": 720,
+        "fps": 30
+      }
+    }
   },
   "model": {
     "path": "",

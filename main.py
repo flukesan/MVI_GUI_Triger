@@ -39,6 +39,7 @@ from inspection_controller import InspectionController
 from component_definition import ComponentDefinitionManager
 from history_manager import HistoryManager
 from history_widget import HistoryWidget
+from camera_settings_widget import CameraSettingsWidget
 
 try:
     from component_definition_widget import ComponentDefinitionWidget
@@ -195,6 +196,11 @@ class InspectionGUI(QMainWindow):
         self.history_widget = HistoryWidget()
         self.tabs.addTab(self.history_widget, "History")
 
+        # Camera Settings Tab
+        self.camera_settings_widget = CameraSettingsWidget()
+        self.camera_settings_widget.camera_config_changed.connect(self.on_camera_config_changed)
+        self.tabs.addTab(self.camera_settings_widget, "Camera Settings")
+
         # Component Definition Tab
         if COMPONENT_DEF_AVAILABLE:
             self.component_def_widget = ComponentDefinitionWidget()
@@ -233,13 +239,13 @@ class InspectionGUI(QMainWindow):
 
         cam_layout.addWidget(QLabel("Cam 1:"), 0, 0)
         self.cam1_source = QComboBox()
-        self.cam1_source.addItems(["USB:0", "USB:1", "USB:2", "RTSP URL", "Image File"])
         cam_layout.addWidget(self.cam1_source, 0, 1)
 
         cam_layout.addWidget(QLabel("Cam 2:"), 1, 0)
         self.cam2_source = QComboBox()
-        self.cam2_source.addItems(["None", "USB:0", "USB:1", "USB:2", "RTSP URL"])
         cam_layout.addWidget(self.cam2_source, 1, 1)
+
+        self._populate_camera_combos()
 
         cam_btn_layout = QHBoxLayout()
         self.connect_cam_btn = QPushButton("Connect")
@@ -535,49 +541,44 @@ class InspectionGUI(QMainWindow):
     #  CAMERA HANDLERS
     # ═══════════════════════════════════════════
 
-    def _parse_camera_source(self, combo: QComboBox):
-        """Parse camera source from combo box selection"""
-        text = combo.currentText()
-        if text.startswith("USB:"):
-            return int(text.split(":")[1])
-        elif text == "RTSP URL":
-            url, ok = self._ask_rtsp_url()
-            return url if ok else None
-        elif text == "Image File":
-            return "file"
-        elif text == "None":
-            return None
-        return 0
+    def _populate_camera_combos(self):
+        """Populate camera combos from config.json sources"""
+        sources = self.config.get("camera", {}).get("sources", {})
 
-    def _ask_rtsp_url(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("RTSP URL")
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("RTSP URL:"))
-        url_input = QLineEdit()
-        url_input.setPlaceholderText("rtsp://user:pass@192.168.1.100:554/stream")
-        layout.addWidget(url_input)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        self.cam1_source.clear()
+        self.cam2_source.clear()
+        self.cam2_source.addItem("-- None --", None)
 
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            return url_input.text().strip(), True
-        return "", False
+        for cam_id, cam_data in sources.items():
+            label = cam_data.get("label", cam_id)
+            cam_type = cam_data.get("type", "usb").upper()
+            display = f"{label} [{cam_type}]"
+            self.cam1_source.addItem(display, cam_id)
+            self.cam2_source.addItem(display, cam_id)
+
+        if self.cam1_source.count() == 0:
+            self.cam1_source.addItem("-- No cameras configured --", None)
+
+    def on_camera_config_changed(self):
+        """เมื่อ Camera Settings เปลี่ยน — reload config แล้ว refresh combos"""
+        self.config = self.load_config()
+        self._populate_camera_combos()
+        self.status_bar.showMessage("Camera configuration updated")
 
     def on_connect_camera(self):
-        src1 = self._parse_camera_source(self.cam1_source)
-        if src1 == "file":
-            self.status_bar.showMessage("Use 'Load Image File' button for file inspection")
-            return
-        if src1 is not None:
-            self.camera_manager.open_camera(0, src1)
+        sources = self.config.get("camera", {}).get("sources", {})
 
-        src2 = self._parse_camera_source(self.cam2_source)
-        if src2 is not None and src2 != "file":
-            self.camera_manager.open_camera(1, src2)
+        # Camera 1
+        cam1_id = self.cam1_source.currentData()
+        if cam1_id and cam1_id in sources:
+            cam1_config = sources[cam1_id]
+            self.camera_manager.open_camera_from_config(0, cam1_config)
+
+        # Camera 2
+        cam2_id = self.cam2_source.currentData()
+        if cam2_id and cam2_id in sources:
+            cam2_config = sources[cam2_id]
+            self.camera_manager.open_camera_from_config(1, cam2_config)
 
     def on_disconnect_camera(self):
         if self._realtime_running:
