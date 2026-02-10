@@ -5,6 +5,7 @@ Inspection Controller for Dual Mode Inspection System
 """
 import math
 import time
+import threading
 from datetime import datetime
 from typing import Optional, Dict, List, Set
 
@@ -12,14 +13,61 @@ import cv2
 import numpy as np
 
 try:
-    from PyQt6.QtCore import QObject, QTimer, pyqtSignal as Signal
+    from PyQt6.QtCore import QObject, QTimer, QThread, pyqtSignal as Signal
 except ImportError:
-    from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtCore import QObject, QTimer, QThread, Signal
 
 from camera_manager import CameraManager
 from detection_engine import DetectionEngine
 from component_definition import ComponentDefinitionManager
 from history_manager import HistoryManager
+
+
+class DetectionWorker(QThread):
+    """Background thread for YOLO detection — ไม่บล็อก GUI thread"""
+    detection_done = Signal(int, object, dict, object)  # (camera_id, frame, detection_result, expected_parts)
+
+    def __init__(self, detector: DetectionEngine):
+        super().__init__()
+        self.detector = detector
+        self._lock = threading.Lock()
+        self._pending_frame = None
+        self._pending_camera_id = None
+        self._running = True
+        self._has_work = threading.Event()
+
+    def submit_frame(self, camera_id: int, frame: np.ndarray):
+        """Submit frame for detection (drops old frame if detection is still running)"""
+        with self._lock:
+            self._pending_frame = frame
+            self._pending_camera_id = camera_id
+        self._has_work.set()
+
+    def run(self):
+        while self._running:
+            # Wait for work
+            self._has_work.wait(timeout=0.1)
+            if not self._running:
+                break
+            self._has_work.clear()
+
+            # Grab latest frame
+            with self._lock:
+                frame = self._pending_frame
+                camera_id = self._pending_camera_id
+                self._pending_frame = None
+
+            if frame is None:
+                continue
+
+            # Run detection (off the GUI thread)
+            detection = self.detector.detect(frame)
+            self.detection_done.emit(camera_id, frame, detection, None)
+
+    def stop(self):
+        self._running = False
+        self._has_work.set()
+        self.wait(3000)
 
 
 class InspectionController(QObject):
@@ -62,6 +110,10 @@ class InspectionController(QObject):
         # Frame skip สำหรับ Realtime mode
         self._frame_skip_counter = 0
         self._last_result: Optional[dict] = None
+
+        # Background detection worker
+        self._detection_worker: Optional[DetectionWorker] = None
+        self._detecting: bool = False  # True = detection is in progress
 
     # ─── Product / Expected Parts ───
 
@@ -179,7 +231,7 @@ class InspectionController(QObject):
     # ─── Realtime Mode ───
 
     def start_realtime(self, camera_id: int = 0):
-        """เริ่ม realtime — stream + detect"""
+        """เริ่ม realtime — stream + detect (detection ทำงานใน background thread)"""
         if not self.detector.is_model_loaded():
             self.error_occurred.emit("Model not loaded")
             return
@@ -189,9 +241,15 @@ class InspectionController(QObject):
             return
 
         self.is_streaming = True
+        self._detecting = False
         self._frame_count = 0
         self._fps_start_time = time.time()
         self._frame_skip_counter = 0
+
+        # Create and start detection worker (background thread)
+        self._detection_worker = DetectionWorker(self.detector)
+        self._detection_worker.detection_done.connect(self._on_detection_done)
+        self._detection_worker.start()
 
         # Connect camera stream to our handler
         self.camera.frame_captured.connect(self._on_realtime_frame)
@@ -201,7 +259,8 @@ class InspectionController(QObject):
         self.camera.start_stream(camera_id, stream_fps)
 
         self.status_changed.emit("streaming")
-        print(f"Realtime started: camera={camera_id}, stream_fps={stream_fps}, inspect_fps={self.inspect_fps}")
+        print(f"Realtime started: camera={camera_id}, stream_fps={stream_fps}, "
+              f"inspect_fps={self.inspect_fps}, detection=background thread")
 
     def stop_realtime(self, camera_id: int = 0):
         """หยุด realtime"""
@@ -212,48 +271,40 @@ class InspectionController(QObject):
         except (TypeError, RuntimeError):
             pass
 
+        # Stop detection worker
+        if self._detection_worker:
+            self._detection_worker.stop()
+            self._detection_worker = None
+
         self.camera.stop_stream(camera_id)
+        self._detecting = False
         self.status_changed.emit("ready")
         print("Realtime stopped")
 
     def _on_realtime_frame(self, camera_id: int, frame: np.ndarray):
-        """เรียกทุกเฟรมจากกล้อง"""
+        """เรียกทุกเฟรมจากกล้อง — แสดง preview ทุกเฟรม, detect เฉพาะเฟรมที่เลือก"""
         if not self.is_streaming:
             return
 
-        # Frame skip — ไม่ detect ทุกเฟรม (ประหยัด GPU)
-        # เช่น stream 30fps แต่ detect 10fps = skip 2 เฟรม
+        # ═══ แสดง live preview ทุกเฟรม (ไม่ต้องรอ detection) ═══
+        self.frame_display.emit(camera_id, frame)
+
+        # ═══ Frame skip — ส่ง detect เฉพาะเฟรมที่เลือก ═══
         stream_fps = 30
         skip_ratio = max(1, stream_fps // max(self.inspect_fps, 1))
         self._frame_skip_counter += 1
 
         if self._frame_skip_counter % skip_ratio != 0:
-            # เฟรมนี้ไม่ detect แค่แสดง preview (ใช้ผลเก่า)
-            if self._last_result and self._last_result.get("annotated_image") is not None:
-                pass  # ไม่ต้อง emit ซ้ำ ให้แสดงภาพจาก detection ล่าสุด
             return
 
-        # Detect เฟรมนี้
-        detection = self.detector.detect(frame)
-        result = self._compare_with_expected(detection, camera_id, frame)
+        # Skip ถ้า detection ก่อนหน้ายังทำไม่เสร็จ (drop frame แทน)
+        if self._detecting:
+            return
 
-        annotated = self.detector.draw_detections(
-            frame.copy(),
-            detection["detections"],
-            result.get("missing_parts_detail")
-        )
-        result["annotated_image"] = annotated
-
-        # Display
-        self.frame_display.emit(camera_id, annotated)
-
-        # Emit result
-        self.inspection_result.emit(result)
-        self._last_result = result
-
-        # Save FAIL images only (Realtime mode)
-        if result["status"] == "FAIL" and self.save_fail_images:
-            self._save_to_history(result, annotated)
+        # Submit frame to background detection worker
+        if self._detection_worker:
+            self._detecting = True
+            self._detection_worker.submit_frame(camera_id, frame.copy())
 
         # FPS calculation
         self._frame_count += 1
@@ -263,6 +314,34 @@ class InspectionController(QObject):
             self.fps_updated.emit(self._current_fps)
             self._frame_count = 0
             self._fps_start_time = time.time()
+
+    def _on_detection_done(self, camera_id: int, frame: np.ndarray,
+                            detection: dict, _unused):
+        """เรียกเมื่อ background detection เสร็จ — annotate + emit result"""
+        if not self.is_streaming:
+            return
+
+        self._detecting = False
+
+        result = self._compare_with_expected(detection, camera_id, frame)
+
+        annotated = self.detector.draw_detections(
+            frame.copy(),
+            detection["detections"],
+            result.get("missing_parts_detail")
+        )
+        result["annotated_image"] = annotated
+
+        # แสดงภาพ annotated (ทับ preview)
+        self.frame_display.emit(camera_id, annotated)
+
+        # Emit result
+        self.inspection_result.emit(result)
+        self._last_result = result
+
+        # Save FAIL images only (Realtime mode)
+        if result["status"] == "FAIL" and self.save_fail_images:
+            self._save_to_history(result, annotated)
 
     # ─── Comparison Logic ───
 

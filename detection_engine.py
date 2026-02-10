@@ -272,3 +272,36 @@ class DetectionEngine(QObject):
 
     def set_device(self, device: str):
         self.device = device
+
+    @staticmethod
+    def get_gpu_info() -> dict:
+        """ตรวจสอบ GPU status และข้อมูลรายละเอียด"""
+        info = {
+            "gpu_available": False,
+            "gpu_name": "",
+            "cuda_version": "",
+            "torch_version": "",
+            "gpu_memory_total_mb": 0,
+            "gpu_memory_used_mb": 0,
+            "gpu_memory_free_mb": 0,
+        }
+        try:
+            import torch
+            info["torch_version"] = torch.__version__
+            info["cuda_version"] = torch.version.cuda or ""
+            info["gpu_available"] = torch.cuda.is_available()
+
+            if info["gpu_available"]:
+                info["gpu_name"] = torch.cuda.get_device_name(0)
+                mem_total = torch.cuda.get_device_properties(0).total_mem
+                mem_alloc = torch.cuda.memory_allocated(0)
+                mem_reserved = torch.cuda.memory_reserved(0)
+                info["gpu_memory_total_mb"] = round(mem_total / 1024**2)
+                info["gpu_memory_used_mb"] = round(mem_alloc / 1024**2)
+                info["gpu_memory_free_mb"] = round((mem_total - mem_reserved) / 1024**2)
+        except ImportError:
+            info["torch_version"] = "not installed"
+        except Exception as e:
+            info["error"] = str(e)
+
+        return info

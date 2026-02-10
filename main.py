@@ -316,12 +316,21 @@ class InspectionGUI(QMainWindow):
         conf_row.addWidget(self.conf_label)
         model_layout.addLayout(conf_row, 2, 1)
 
+        model_btn_row = QHBoxLayout()
         self.load_model_btn = QPushButton("Load Model")
         self.load_model_btn.setStyleSheet(
             "QPushButton { background-color: #007bff; color: white; padding: 6px; font-weight: bold; }"
             "QPushButton:hover { background-color: #0056b3; }")
         self.load_model_btn.clicked.connect(self.on_load_model)
-        model_layout.addWidget(self.load_model_btn, 3, 0, 1, 2)
+        model_btn_row.addWidget(self.load_model_btn)
+
+        self.gpu_info_btn = QPushButton("GPU Info")
+        self.gpu_info_btn.setStyleSheet(
+            "QPushButton { background-color: #6f42c1; color: white; padding: 6px; }"
+            "QPushButton:hover { background-color: #5a32a3; }")
+        self.gpu_info_btn.clicked.connect(self.on_show_gpu_info)
+        model_btn_row.addWidget(self.gpu_info_btn)
+        model_layout.addLayout(model_btn_row, 3, 0, 1, 2)
 
         self.model_status_label = QLabel("No model loaded")
         self.model_status_label.setWordWrap(True)
@@ -721,6 +730,40 @@ class InspectionGUI(QMainWindow):
         self.conf_label.setText(f"{conf:.2f}")
         self.detection_engine.set_confidence(conf)
         self.config["model"]["confidence"] = conf
+
+    def on_show_gpu_info(self):
+        """แสดงข้อมูล GPU / CUDA — เช็คว่าใช้ GPU จริงหรือไม่"""
+        gpu_info = DetectionEngine.get_gpu_info()
+
+        lines = []
+        lines.append(f"PyTorch: {gpu_info.get('torch_version', 'N/A')}")
+        lines.append(f"CUDA: {gpu_info.get('cuda_version', 'N/A')}")
+
+        if gpu_info.get("gpu_available"):
+            lines.append(f"GPU: {gpu_info.get('gpu_name', 'Unknown')}")
+            total = gpu_info.get("gpu_memory_total_mb", 0)
+            used = gpu_info.get("gpu_memory_used_mb", 0)
+            free = gpu_info.get("gpu_memory_free_mb", 0)
+            lines.append(f"VRAM Total: {total} MB")
+            lines.append(f"VRAM Used: {used} MB")
+            lines.append(f"VRAM Free: {free} MB")
+        else:
+            lines.append("GPU: Not available (using CPU)")
+
+        # Current engine device
+        if self.detection_engine.is_model_loaded():
+            dev = self.detection_engine.device
+            if dev in ("0", "cuda"):
+                lines.append(f"\nModel running on: GPU ({dev})")
+            else:
+                lines.append(f"\nModel running on: {dev.upper()}")
+        else:
+            lines.append("\nModel not loaded")
+
+        if gpu_info.get("error"):
+            lines.append(f"\nError: {gpu_info['error']}")
+
+        QMessageBox.information(self, "GPU Information", "\n".join(lines))
 
     # ═══════════════════════════════════════════
     #  MODE & PRODUCT HANDLERS

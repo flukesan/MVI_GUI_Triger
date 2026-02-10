@@ -33,15 +33,21 @@ class CameraStreamWorker(QThread):
         self.running = True
         interval = 1.0 / max(self.target_fps, 1)
         while self.running:
+            start = time.time()
             if self.backend and self.backend.is_connected():
                 frame = self.backend.get_frame()
                 if frame is not None:
                     self.frame_ready.emit(self.camera_id, frame)
                 else:
-                    time.sleep(0.01)
+                    time.sleep(0.005)
             else:
                 time.sleep(0.1)
-            time.sleep(interval)
+                continue
+            # Adaptive sleep: subtract elapsed time from interval
+            elapsed = time.time() - start
+            sleep_time = interval - elapsed
+            if sleep_time > 0.001:
+                time.sleep(sleep_time)
 
     def stop(self):
         self.running = False
