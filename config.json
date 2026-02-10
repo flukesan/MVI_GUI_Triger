@@ -1,19 +1,27 @@
 {
-  "mqtt": {
-    "broker": "localhost",
-    "port": 1883,
-    "username": "",
-    "password": "",
-    "qos": 1
+  "camera": {
+    "sources": {
+      "cam1": {"type": "usb", "index": 0, "label": "Camera 1"},
+      "cam2": {"type": "usb", "index": 1, "label": "Camera 2"}
+    },
+    "resolution": {"width": 1280, "height": 720},
+    "stream_fps": 30
   },
-  "topics": [
-    "mvi/camera01/trigger",
-    "mvi/camera02/trigger"
-  ],
-  "subscribe_topic": "#",
+  "model": {
+    "path": "",
+    "device": "auto",
+    "confidence": 0.5,
+    "iou_threshold": 0.45
+  },
+  "inspection": {
+    "mode": "capture",
+    "realtime_inspect_fps": 10,
+    "save_pass_images": false,
+    "save_fail_images": true
+  },
   "ui_state": {
-    "trigger_mode": "single",
-    "last_single_topic": "mvi/camera01/trigger",
-    "selected_topics": []
+    "last_product_id": null,
+    "cam1_zoom": 0.25,
+    "cam2_zoom": 0.25
   }
 }

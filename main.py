@@ -1,1505 +1,946 @@
 """
-MVI Edge Inspection Trigger GUI
-PyQt6/PySide6 GUI Application for triggering MVI inspections via MQTT
+Dual Mode Inspection System
+Local YOLOv8 + Camera GUI — ไม่พึ่ง MVI / MQTT
+รองรับ Capture Mode และ Realtime Mode
+GPU: RTX4000
 """
 import sys
 import json
 import os
 from pathlib import Path
 
-# Try to import PyQt6, fallback to PySide6 if not available
 try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget,
-        QRadioButton, QCheckBox
+        QRadioButton, QSlider, QFileDialog, QSplitter
     )
-    from PyQt6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
+    from PyQt6.QtCore import Qt, QTimer, QSize
+    from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter, QPen, QImage
     print("Using PyQt6")
 except ImportError:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget,
-        QRadioButton, QCheckBox
+        QRadioButton, QSlider, QFileDialog, QSplitter
     )
-    from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
+    from PySide6.QtCore import Qt, QTimer, QSize
+    from PySide6.QtGui import QFont, QColor, QPixmap, QPainter, QPen, QImage
     print("Using PySide6")
 
-from mqtt_client import MQTTClient
+import cv2
+import numpy as np
+
+from camera_manager import CameraManager
+from detection_engine import DetectionEngine
+from inspection_controller import InspectionController
+from component_definition import ComponentDefinitionManager
 from history_manager import HistoryManager
 from history_widget import HistoryWidget
 
-# Component Definition modules
 try:
     from component_definition_widget import ComponentDefinitionWidget
     COMPONENT_DEF_AVAILABLE = True
 except ImportError as e:
-    print(f"⚠️ Component Definition not available: {e}")
+    print(f"Component Definition not available: {e}")
     COMPONENT_DEF_AVAILABLE = False
 
-class AddTopicDialog(QDialog):
-    """Dialog for adding new MQTT topic"""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("เพิ่ม Topic")
-        self.setModal(True)
-        self.setMinimumWidth(400)
-
-        layout = QVBoxLayout()
-
-        # Topic input
-        topic_label = QLabel("Topic:")
-        self.topic_input = QLineEdit()
-        self.topic_input.setPlaceholderText("เช่น: mvi/model3/trigger")
-
-        layout.addWidget(topic_label)
-        layout.addWidget(self.topic_input)
-
-        # Dialog buttons
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-
-        layout.addWidget(button_box)
-        self.setLayout(layout)
-
-    def get_topic(self):
-        """Get the entered topic"""
-        return self.topic_input.text().strip()
+def numpy_to_qpixmap(frame: np.ndarray) -> QPixmap:
+    """Convert numpy BGR frame to QPixmap"""
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    h, w, ch = rgb.shape
+    bytes_per_line = ch * w
+    qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(qimg)
 
 
-class MVITriggerGUI(QMainWindow):
-    """Main GUI window for MVI Edge Inspection Trigger"""
+class InspectionGUI(QMainWindow):
+    """Main GUI — Dual Mode Inspection System"""
 
     def __init__(self):
         super().__init__()
         self.config_file = Path("config.json")
         self.config = self.load_config()
-        self.mqtt_client = None
-        self.history_manager = HistoryManager()  # Initialize history manager
+
+        # Core components
+        self.camera_manager = CameraManager()
+        self.detection_engine = DetectionEngine()
+        self.component_manager = ComponentDefinitionManager()
+        self.history_manager = HistoryManager()
+        self.inspection_controller = InspectionController(
+            self.camera_manager,
+            self.detection_engine,
+            self.component_manager,
+            self.history_manager
+        )
+
         self.init_ui()
-        self.load_ui_state()  # Load saved UI state (mode and selections)
-        self.init_mqtt()
+        self.load_ui_state()
+        self.connect_signals()
+        self.apply_config_settings()
+
+    # ═══════════════════════════════════════════
+    #  CONFIG
+    # ═══════════════════════════════════════════
 
     def load_config(self):
-        """Load configuration from JSON file"""
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"ไม่สามารถโหลด config.json: {e}")
-            sys.exit(1)
+            print(f"Config load error, using defaults: {e}")
+            return {
+                "camera": {"sources": {"cam1": {"type": "usb", "index": 0}},
+                           "resolution": {"width": 1280, "height": 720},
+                           "stream_fps": 30},
+                "model": {"path": "", "device": "auto", "confidence": 0.5},
+                "inspection": {"mode": "capture", "realtime_inspect_fps": 10},
+                "ui_state": {}
+            }
 
     def save_config(self):
-        """Save configuration to JSON file"""
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            QMessageBox.warning(self, "Warning", f"ไม่สามารถบันทึก config: {e}")
+            print(f"Config save error: {e}")
 
     def save_ui_state(self):
-        """Save UI state (mode and selected topics) to config"""
-        try:
-            ui_state = {}
-
-            # Save trigger mode
-            if self.single_mode_radio.isChecked():
-                ui_state["trigger_mode"] = "single"
-                ui_state["last_single_topic"] = self.topic_combo.currentText()
-            else:
-                ui_state["trigger_mode"] = "multiple"
-                # Save selected topics in multiple mode
-                selected = []
-                for checkbox in self.topic_checkboxes:
-                    if checkbox.isChecked():
-                        selected.append(checkbox.text())
-                ui_state["selected_topics"] = selected
-
-            # Update config
-            self.config["ui_state"] = ui_state
-
-            # Save to file
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.config, f, indent=2, ensure_ascii=False)
-
-        except Exception as e:
-            print(f"⚠️ Failed to save UI state: {e}")
+        mode = "capture" if self.capture_radio.isChecked() else "realtime"
+        product_id = self.product_combo.currentData()
+        self.config["ui_state"] = {
+            "last_product_id": product_id,
+            "cam1_zoom": self.cam1_zoom,
+            "cam2_zoom": self.cam2_zoom
+        }
+        self.config["inspection"]["mode"] = mode
+        self.save_config()
 
     def load_ui_state(self):
-        """Load UI state (mode and selected topics) from config"""
-        try:
-            ui_state = self.config.get("ui_state", {})
+        ui = self.config.get("ui_state", {})
+        mode = self.config.get("inspection", {}).get("mode", "capture")
+        if mode == "realtime":
+            self.realtime_radio.setChecked(True)
+        else:
+            self.capture_radio.setChecked(True)
 
-            # Load trigger mode
-            mode = ui_state.get("trigger_mode", "single")
-            if mode == "multiple":
-                self.multi_mode_radio.setChecked(True)
+        last_product = ui.get("last_product_id")
+        if last_product:
+            for i in range(self.product_combo.count()):
+                if self.product_combo.itemData(i) == last_product:
+                    self.product_combo.setCurrentIndex(i)
+                    break
 
-                # Load selected topics
-                selected_topics = ui_state.get("selected_topics", [])
-                for checkbox in self.topic_checkboxes:
-                    if checkbox.text() in selected_topics:
-                        checkbox.setChecked(True)
-            else:
-                self.single_mode_radio.setChecked(True)
+    def apply_config_settings(self):
+        model_cfg = self.config.get("model", {})
+        if model_cfg.get("path"):
+            self.model_path_label.setText(os.path.basename(model_cfg["path"]))
 
-                # Load last selected topic in single mode
-                last_topic = ui_state.get("last_single_topic", "")
-                if last_topic:
-                    index = self.topic_combo.findText(last_topic)
-                    if index >= 0:
-                        self.topic_combo.setCurrentIndex(index)
+        conf = model_cfg.get("confidence", 0.5)
+        self.confidence_slider.setValue(int(conf * 100))
 
-            print(f"✓ UI state loaded: mode={mode}")
+    # ═══════════════════════════════════════════
+    #  SIGNALS
+    # ═══════════════════════════════════════════
 
-        except Exception as e:
-            print(f"⚠️ Failed to load UI state: {e}")
+    def connect_signals(self):
+        # Camera
+        self.camera_manager.camera_opened.connect(self.on_camera_opened)
+        self.camera_manager.camera_closed.connect(self.on_camera_closed)
+        self.camera_manager.camera_error.connect(self.on_camera_error)
+
+        # Detection
+        self.detection_engine.model_loaded.connect(self.on_model_loaded)
+        self.detection_engine.model_error.connect(self.on_model_error)
+
+        # Inspection Controller
+        self.inspection_controller.inspection_result.connect(self.on_inspection_result)
+        self.inspection_controller.frame_display.connect(self.on_frame_display)
+        self.inspection_controller.status_changed.connect(self.on_status_changed)
+        self.inspection_controller.error_occurred.connect(self.on_error)
+        self.inspection_controller.fps_updated.connect(self.on_fps_updated)
+
+    # ═══════════════════════════════════════════
+    #  UI INIT
+    # ═══════════════════════════════════════════
 
     def init_ui(self):
-        """Initialize user interface"""
-        self.setWindowTitle("MVI Edge Inspection Trigger")
-        self.setMinimumSize(1100, 750)
+        self.setWindowTitle("Dual Mode Inspection System (YOLOv8 + RTX4000)")
+        self.setMinimumSize(1200, 800)
 
-        # Central widget with tabs
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # Create tab widget
+        # Tab widget
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #ccc;
-                border-radius: 5px;
-            }
+            QTabWidget::pane { border: 1px solid #ccc; border-radius: 5px; }
             QTabBar::tab {
-                background: #e9ecef;
-                padding: 10px 30px;
-                margin-right: 2px;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
+                background: #e9ecef; padding: 10px 30px; margin-right: 2px;
+                border-top-left-radius: 5px; border-top-right-radius: 5px;
             }
-            QTabBar::tab:selected {
-                background: #007bff;
-                color: white;
-            }
+            QTabBar::tab:selected { background: #007bff; color: white; }
         """)
 
-        # Create Live tab
+        # Live Tab
         self.live_widget = QWidget()
         self.init_live_tab()
-        self.tabs.addTab(self.live_widget, "🔴 Live")
+        self.tabs.addTab(self.live_widget, "Live Inspection")
 
-        # Create History tab
+        # History Tab
         self.history_widget = HistoryWidget()
-        self.tabs.addTab(self.history_widget, "📋 History")
+        self.tabs.addTab(self.history_widget, "History")
 
-        # Create Component Definition tab (if available)
+        # Component Definition Tab
         if COMPONENT_DEF_AVAILABLE:
             self.component_def_widget = ComponentDefinitionWidget()
-            self.tabs.addTab(self.component_def_widget, "📋 Component Definition")
+            self.tabs.addTab(self.component_def_widget, "Component Definition")
+
         main_layout.addWidget(self.tabs)
 
-        # ========== Status Bar ==========
-        self.statusBar = QStatusBar()
-        self.setStatusBar(self.statusBar)
-        self.statusBar.showMessage("พร้อมใช้งาน")
+        # Status Bar
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("Ready")
 
-        # Style
         self.setStyleSheet("""
             QGroupBox {
-                font-size: 14px;
-                font-weight: bold;
-                border: 2px solid #ccc;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
+                font-size: 13px; font-weight: bold;
+                border: 2px solid #ccc; border-radius: 5px;
+                margin-top: 10px; padding-top: 10px;
             }
             QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
+                subcontrol-origin: margin; left: 10px; padding: 0 5px;
             }
         """)
 
     def init_live_tab(self):
-        """Initialize Live monitoring tab"""
-        live_layout = QVBoxLayout(self.live_widget)
+        live_layout = QHBoxLayout(self.live_widget)
 
-        # ========== MQTT Connection Status ==========
-        connection_group = QGroupBox("MQTT Connection")
-        connection_layout = QHBoxLayout()
+        # ═══ LEFT PANEL (Settings) ═══
+        left_panel = QWidget()
+        left_panel.setMaximumWidth(320)
+        left_panel.setMinimumWidth(280)
+        left_layout = QVBoxLayout(left_panel)
 
-        self.connection_label = QLabel("Disconnected")
-        self.connection_label.setStyleSheet(
-            "QLabel { background-color: #dc3545; color: white; padding: 10px; "
-            "border-radius: 5px; font-weight: bold; }"
-        )
+        # --- Camera Settings ---
+        cam_group = QGroupBox("Camera")
+        cam_layout = QGridLayout()
 
-        connection_layout.addWidget(self.connection_label)
-        connection_group.setLayout(connection_layout)
-        live_layout.addWidget(connection_group)
+        cam_layout.addWidget(QLabel("Cam 1:"), 0, 0)
+        self.cam1_source = QComboBox()
+        self.cam1_source.addItems(["USB:0", "USB:1", "USB:2", "RTSP URL", "Image File"])
+        cam_layout.addWidget(self.cam1_source, 0, 1)
 
-        # ========== Topic Selection with Mode Toggle ==========
-        topic_group = QGroupBox("📡 เลือก Topic สำหรับ Trigger")
-        topic_main_layout = QVBoxLayout()
+        cam_layout.addWidget(QLabel("Cam 2:"), 1, 0)
+        self.cam2_source = QComboBox()
+        self.cam2_source.addItems(["None", "USB:0", "USB:1", "USB:2", "RTSP URL"])
+        cam_layout.addWidget(self.cam2_source, 1, 1)
 
-        # Mode selection (Single or Multiple)
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("Trigger Mode:"))
+        cam_btn_layout = QHBoxLayout()
+        self.connect_cam_btn = QPushButton("Connect")
+        self.connect_cam_btn.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; padding: 6px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #218838; }")
+        self.connect_cam_btn.clicked.connect(self.on_connect_camera)
+        cam_btn_layout.addWidget(self.connect_cam_btn)
 
-        self.single_mode_radio = QRadioButton("Single Topic")
-        self.multi_mode_radio = QRadioButton("Multiple Topics")
-        self.single_mode_radio.setChecked(True)  # Default to Single mode
-        self.single_mode_radio.toggled.connect(self.on_mode_changed)
+        self.disconnect_cam_btn = QPushButton("Disconnect")
+        self.disconnect_cam_btn.setStyleSheet(
+            "QPushButton { background-color: #dc3545; color: white; padding: 6px; }"
+            "QPushButton:hover { background-color: #c82333; }")
+        self.disconnect_cam_btn.clicked.connect(self.on_disconnect_camera)
+        self.disconnect_cam_btn.setEnabled(False)
+        cam_btn_layout.addWidget(self.disconnect_cam_btn)
+        cam_layout.addLayout(cam_btn_layout, 2, 0, 1, 2)
 
-        mode_layout.addWidget(self.single_mode_radio)
-        mode_layout.addWidget(self.multi_mode_radio)
-        mode_layout.addStretch()
-        topic_main_layout.addLayout(mode_layout)
+        self.cam_status_label = QLabel("Disconnected")
+        self.cam_status_label.setStyleSheet(
+            "QLabel { background-color: #dc3545; color: white; padding: 5px; "
+            "border-radius: 3px; font-weight: bold; }")
+        cam_layout.addWidget(self.cam_status_label, 3, 0, 1, 2)
 
-        # === Single Topic Mode UI ===
-        self.single_mode_widget = QWidget()
-        single_layout = QVBoxLayout()
-        single_layout.setContentsMargins(0, 10, 0, 0)
+        cam_group.setLayout(cam_layout)
+        left_layout.addWidget(cam_group)
 
-        single_row = QHBoxLayout()
-        single_row.addWidget(QLabel("Topic:"))
+        # --- Model Settings ---
+        model_group = QGroupBox("YOLO Model")
+        model_layout = QGridLayout()
 
-        self.topic_combo = QComboBox()
-        self.topic_combo.setMinimumHeight(40)
-        self.topic_combo.setFont(QFont("Arial", 11))
-        self.update_topic_list()
-        single_row.addWidget(self.topic_combo, 1)
+        model_layout.addWidget(QLabel("Model:"), 0, 0)
+        model_row = QHBoxLayout()
+        self.model_path_label = QLabel("No model")
+        self.model_path_label.setStyleSheet("color: #6c757d;")
+        model_row.addWidget(self.model_path_label, 1)
+        self.browse_model_btn = QPushButton("Browse")
+        self.browse_model_btn.clicked.connect(self.on_browse_model)
+        model_row.addWidget(self.browse_model_btn)
+        model_layout.addLayout(model_row, 0, 1)
 
-        single_layout.addLayout(single_row)
-        self.single_mode_widget.setLayout(single_layout)
-        topic_main_layout.addWidget(self.single_mode_widget)
+        model_layout.addWidget(QLabel("Device:"), 1, 0)
+        self.device_combo = QComboBox()
+        self.device_combo.addItems(["auto", "cpu", "0 (GPU)"])
+        model_layout.addWidget(self.device_combo, 1, 1)
 
-        # === Multiple Topics Mode UI ===
-        self.multi_mode_widget = QWidget()
-        multi_layout = QVBoxLayout()
-        multi_layout.setContentsMargins(0, 10, 0, 0)
+        model_layout.addWidget(QLabel("Confidence:"), 2, 0)
+        conf_row = QHBoxLayout()
+        self.confidence_slider = QSlider(Qt.Orientation.Horizontal)
+        self.confidence_slider.setRange(10, 95)
+        self.confidence_slider.setValue(50)
+        self.confidence_slider.valueChanged.connect(self.on_confidence_changed)
+        conf_row.addWidget(self.confidence_slider)
+        self.conf_label = QLabel("0.50")
+        conf_row.addWidget(self.conf_label)
+        model_layout.addLayout(conf_row, 2, 1)
 
-        # Select All + Selected count
-        multi_top_row = QHBoxLayout()
-        self.select_all_checkbox = QCheckBox("Select All")
-        self.select_all_checkbox.stateChanged.connect(self.on_select_all_changed)
-        multi_top_row.addWidget(self.select_all_checkbox)
+        self.load_model_btn = QPushButton("Load Model")
+        self.load_model_btn.setStyleSheet(
+            "QPushButton { background-color: #007bff; color: white; padding: 6px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #0056b3; }")
+        self.load_model_btn.clicked.connect(self.on_load_model)
+        model_layout.addWidget(self.load_model_btn, 3, 0, 1, 2)
 
-        multi_top_row.addWidget(QLabel("|"))
+        self.model_status_label = QLabel("No model loaded")
+        self.model_status_label.setWordWrap(True)
+        self.model_status_label.setStyleSheet("color: #6c757d; font-size: 11px;")
+        model_layout.addWidget(self.model_status_label, 4, 0, 1, 2)
 
-        self.selected_count_label = QLabel("Selected: 0/0")
-        self.selected_count_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        self.selected_count_label.setStyleSheet("QLabel { color: #0056b3; }")
-        multi_top_row.addWidget(self.selected_count_label)
-        multi_top_row.addStretch()
+        model_group.setLayout(model_layout)
+        left_layout.addWidget(model_group)
 
-        multi_layout.addLayout(multi_top_row)
+        # --- Inspection Settings ---
+        insp_group = QGroupBox("Inspection")
+        insp_layout = QVBoxLayout()
 
-        # Checkbox list with scroll area (height for ~4 topics)
-        self.topics_scroll = QScrollArea()
-        self.topics_scroll.setWidgetResizable(True)
-        self.topics_scroll.setMinimumHeight(160)  # ~40px per checkbox * 4
-        self.topics_scroll.setMaximumHeight(160)
-        self.topics_scroll.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                background-color: white;
-            }
-        """)
+        # Mode
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self.capture_radio = QRadioButton("Capture")
+        self.realtime_radio = QRadioButton("Realtime")
+        self.capture_radio.setChecked(True)
+        self.capture_radio.toggled.connect(self.on_mode_changed)
+        mode_row.addWidget(self.capture_radio)
+        mode_row.addWidget(self.realtime_radio)
+        mode_row.addStretch()
+        insp_layout.addLayout(mode_row)
 
-        self.topics_checkbox_widget = QWidget()
-        self.topics_checkbox_layout = QVBoxLayout()
-        self.topics_checkbox_layout.setContentsMargins(5, 5, 5, 5)
-        self.topics_checkbox_layout.setSpacing(5)
+        # Product
+        product_row = QHBoxLayout()
+        product_row.addWidget(QLabel("Product:"))
+        self.product_combo = QComboBox()
+        self.product_combo.addItem("-- No Product --", None)
+        self.load_product_list()
+        self.product_combo.currentIndexChanged.connect(self.on_product_changed)
+        product_row.addWidget(self.product_combo, 1)
 
-        # Create checkboxes for each topic
-        self.topic_checkboxes = []
-        self.update_checkbox_list()
+        self.refresh_products_btn = QPushButton("Refresh")
+        self.refresh_products_btn.setMaximumWidth(60)
+        self.refresh_products_btn.clicked.connect(self.load_product_list)
+        product_row.addWidget(self.refresh_products_btn)
+        insp_layout.addLayout(product_row)
 
-        self.topics_checkbox_layout.addStretch()
-        self.topics_checkbox_widget.setLayout(self.topics_checkbox_layout)
-        self.topics_scroll.setWidget(self.topics_checkbox_widget)
+        self.expected_label = QLabel("Expected: -")
+        self.expected_label.setStyleSheet("color: #495057; font-size: 11px;")
+        insp_layout.addWidget(self.expected_label)
 
-        multi_layout.addWidget(self.topics_scroll)
-        self.multi_mode_widget.setLayout(multi_layout)
-        self.multi_mode_widget.setVisible(False)  # Hidden by default
-        topic_main_layout.addWidget(self.multi_mode_widget)
-
-        # === Bottom row: Add/Remove/Trigger buttons ===
-        bottom_row = QHBoxLayout()
-
-        self.add_topic_btn = QPushButton("➕ Add Topic")
-        self.add_topic_btn.setMinimumHeight(40)
-        self.add_topic_btn.setToolTip("เพิ่ม Topic")
-        self.add_topic_btn.clicked.connect(self.add_topic)
-        bottom_row.addWidget(self.add_topic_btn)
-
-        self.remove_topic_btn = QPushButton("➖ Remove Topic")
-        self.remove_topic_btn.setMinimumHeight(40)
-        self.remove_topic_btn.setToolTip("ลบ Topic")
-        self.remove_topic_btn.clicked.connect(self.remove_topic)
-        bottom_row.addWidget(self.remove_topic_btn)
-
-        bottom_row.addStretch()
-
-        # Trigger button
-        self.trigger_btn = QPushButton("🔘 TRIGGER")
+        # TRIGGER button (Capture mode)
+        self.trigger_btn = QPushButton("TRIGGER")
         self.trigger_btn.setMinimumHeight(50)
-        self.trigger_btn.setMinimumWidth(150)
         self.trigger_btn.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         self.trigger_btn.setStyleSheet(
-            "QPushButton { background-color: #007bff; color: white; "
-            "border-radius: 5px; }"
+            "QPushButton { background-color: #007bff; color: white; border-radius: 5px; }"
             "QPushButton:hover { background-color: #0056b3; }"
             "QPushButton:pressed { background-color: #004085; }"
-            "QPushButton:disabled { background-color: #6c757d; }"
-            "QPushButton:focus { border: 2px solid #80bdff; }"
-        )
-        self.trigger_btn.setToolTip("กด Space bar เพื่อ Trigger")
-        self.trigger_btn.clicked.connect(self.trigger_inspection)
+            "QPushButton:disabled { background-color: #6c757d; }")
+        self.trigger_btn.setToolTip("Space bar to trigger")
+        self.trigger_btn.clicked.connect(self.on_trigger)
         self.trigger_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        bottom_row.addWidget(self.trigger_btn)
+        insp_layout.addWidget(self.trigger_btn)
 
-        topic_main_layout.addLayout(bottom_row)
-        topic_group.setLayout(topic_main_layout)
-        live_layout.addWidget(topic_group)
+        # START / STOP button (Realtime mode)
+        self.start_stop_btn = QPushButton("START")
+        self.start_stop_btn.setMinimumHeight(50)
+        self.start_stop_btn.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.start_stop_btn.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; border-radius: 5px; }"
+            "QPushButton:hover { background-color: #218838; }")
+        self.start_stop_btn.clicked.connect(self.on_start_stop_realtime)
+        self.start_stop_btn.setVisible(False)
+        insp_layout.addWidget(self.start_stop_btn)
 
-        # ========== Dual Camera Display (Side by Side) ==========
+        # Load from file button
+        self.load_file_btn = QPushButton("Load Image File")
+        self.load_file_btn.clicked.connect(self.on_load_image_file)
+        insp_layout.addWidget(self.load_file_btn)
+
+        insp_group.setLayout(insp_layout)
+        left_layout.addWidget(insp_group)
+
+        # --- Result Summary ---
+        result_group = QGroupBox("Last Result")
+        result_layout = QVBoxLayout()
+
+        self.result_status_label = QLabel("--")
+        self.result_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.result_status_label.setFont(QFont("Arial", 24, QFont.Weight.Bold))
+        self.result_status_label.setMinimumHeight(50)
+        self.result_status_label.setStyleSheet(
+            "QLabel { background-color: #e9ecef; color: #6c757d; "
+            "border-radius: 8px; padding: 10px; }")
+        result_layout.addWidget(self.result_status_label)
+
+        self.result_detail_label = QLabel("No inspection yet")
+        self.result_detail_label.setWordWrap(True)
+        self.result_detail_label.setStyleSheet("font-size: 11px; color: #495057;")
+        result_layout.addWidget(self.result_detail_label)
+
+        self.fps_label = QLabel("")
+        self.fps_label.setStyleSheet("color: #007bff; font-weight: bold;")
+        result_layout.addWidget(self.fps_label)
+
+        result_group.setLayout(result_layout)
+        left_layout.addWidget(result_group)
+
+        left_layout.addStretch()
+        live_layout.addWidget(left_panel)
+
+        # ═══ RIGHT PANEL (Camera Viewers) ═══
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
         cameras_layout = QHBoxLayout()
 
-        # Camera 1 (Left)
-        camera1_widgets = self.create_camera_viewer("Camera 1", "cam1")
-        self.cam1_image_id_label = camera1_widgets["image_id_label"]
-        self.cam1_device_label = camera1_widgets["device_label"]
-        self.cam1_zoom_reset_btn = camera1_widgets["zoom_reset_btn"]
-        self.cam1_image_scroll = camera1_widgets["image_scroll"]
-        self.cam1_image_label = camera1_widgets["image_label"]
-        self.cam1_metadata_label = camera1_widgets["metadata_label"]
-        self.cam1_status_label = camera1_widgets["status_label"]
-        cameras_layout.addWidget(camera1_widgets["group"])
+        # Camera 1
+        cam1_widgets = self.create_camera_viewer("Camera 1", "cam1")
+        self.cam1_image_label = cam1_widgets["image_label"]
+        self.cam1_image_scroll = cam1_widgets["image_scroll"]
+        self.cam1_status_label = cam1_widgets["status_label"]
+        self.cam1_info_label = cam1_widgets["info_label"]
+        self.cam1_zoom_reset_btn = cam1_widgets["zoom_reset_btn"]
+        cameras_layout.addWidget(cam1_widgets["group"])
 
-        # Camera 2 (Right)
-        camera2_widgets = self.create_camera_viewer("Camera 2", "cam2")
-        self.cam2_image_id_label = camera2_widgets["image_id_label"]
-        self.cam2_device_label = camera2_widgets["device_label"]
-        self.cam2_zoom_reset_btn = camera2_widgets["zoom_reset_btn"]
-        self.cam2_image_scroll = camera2_widgets["image_scroll"]
-        self.cam2_image_label = camera2_widgets["image_label"]
-        self.cam2_metadata_label = camera2_widgets["metadata_label"]
-        self.cam2_status_label = camera2_widgets["status_label"]
-        cameras_layout.addWidget(camera2_widgets["group"])
+        # Camera 2
+        cam2_widgets = self.create_camera_viewer("Camera 2", "cam2")
+        self.cam2_image_label = cam2_widgets["image_label"]
+        self.cam2_image_scroll = cam2_widgets["image_scroll"]
+        self.cam2_status_label = cam2_widgets["status_label"]
+        self.cam2_info_label = cam2_widgets["info_label"]
+        self.cam2_zoom_reset_btn = cam2_widgets["zoom_reset_btn"]
+        cameras_layout.addWidget(cam2_widgets["group"])
 
-        live_layout.addLayout(cameras_layout)
+        right_layout.addLayout(cameras_layout)
+        live_layout.addWidget(right_panel, 1)
 
-        # Initialize camera state variables
+        # Camera state
         self.cam1_pixmap = None
         self.cam1_zoom = 0.25
-        self.cam1_device_id = None
-
         self.cam2_pixmap = None
         self.cam2_zoom = 0.25
-        self.cam2_device_id = None
-
-        self.latest_camera = None  # Track which camera received data last
-
-        # Multi-topic trigger tracking
-        self.pending_topics = set()  # Topics waiting for response
-        self.pending_responses = {}  # Collected responses {topic: response_data}
-
-        # Trigger timeout timer
-        self.trigger_timer = QTimer()
-        self.trigger_timer.timeout.connect(self.on_trigger_timeout)
-        self.trigger_timer.setSingleShot(True)
+        self._realtime_running = False
 
     def create_camera_viewer(self, title, camera_id):
-        """Create a camera viewer widget with metadata panel (left) and image (right)"""
         group = QGroupBox(title)
         layout = QVBoxLayout()
 
-        # Top row: Device ID, Image ID and Controls
+        # Top row: info + zoom controls
         top_row = QHBoxLayout()
 
-        # Device ID label
-        device_label = QLabel("Device: -")
-        device_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        device_label.setStyleSheet("QLabel { color: #0056b3; padding: 3px; }")
-        top_row.addWidget(device_label)
-
-        # Image ID label
-        image_id_label = QLabel("Image: -")
-        image_id_label.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        image_id_label.setStyleSheet("QLabel { color: #495057; padding: 3px; }")
-        top_row.addWidget(image_id_label)
-
+        info_label = QLabel("No data")
+        info_label.setFont(QFont("Arial", 9))
+        info_label.setStyleSheet("color: #495057; padding: 2px;")
+        top_row.addWidget(info_label)
         top_row.addStretch()
 
-        # Zoom controls
-        zoom_out_btn = QPushButton("🔍-")
-        zoom_out_btn.setMaximumWidth(45)
-        zoom_out_btn.setToolTip("Zoom Out")
+        zoom_out_btn = QPushButton("-")
+        zoom_out_btn.setMaximumWidth(35)
         zoom_out_btn.clicked.connect(lambda: self.camera_zoom_out(camera_id))
         top_row.addWidget(zoom_out_btn)
 
         zoom_reset_btn = QPushButton("25%")
-        zoom_reset_btn.setMaximumWidth(55)
-        zoom_reset_btn.setToolTip("Reset Zoom to 25%")
+        zoom_reset_btn.setMaximumWidth(50)
         zoom_reset_btn.clicked.connect(lambda: self.camera_zoom_reset(camera_id))
         top_row.addWidget(zoom_reset_btn)
 
-        zoom_in_btn = QPushButton("🔍+")
-        zoom_in_btn.setMaximumWidth(45)
-        zoom_in_btn.setToolTip("Zoom In")
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setMaximumWidth(35)
         zoom_in_btn.clicked.connect(lambda: self.camera_zoom_in(camera_id))
         top_row.addWidget(zoom_in_btn)
 
-        fullscreen_btn = QPushButton("⛶")
-        fullscreen_btn.setMaximumWidth(45)
-        fullscreen_btn.setToolTip("Full Screen")
+        fullscreen_btn = QPushButton("Full")
+        fullscreen_btn.setMaximumWidth(40)
         fullscreen_btn.clicked.connect(lambda: self.camera_show_fullscreen(camera_id))
         top_row.addWidget(fullscreen_btn)
 
         layout.addLayout(top_row)
 
-        # Status label (hidden by default, shown when data received)
+        # Status label (PASS/FAIL)
         status_label = QLabel()
         status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_label.setMinimumHeight(80)
-        status_label.setFont(QFont("Arial", 32, QFont.Weight.Bold))
-        status_label.setVisible(False)  # Hidden by default
+        status_label.setMinimumHeight(60)
+        status_label.setFont(QFont("Arial", 28, QFont.Weight.Bold))
+        status_label.setVisible(False)
         layout.addWidget(status_label)
 
-        # Content row: Metadata (left) + Image (right)
-        content_layout = QHBoxLayout()
-
-        # Left: Metadata panel
-        metadata_label = QLabel("ยังไม่มีข้อมูล")
-        metadata_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        metadata_label.setWordWrap(True)
-        metadata_label.setFont(QFont("Arial", 9))
-        metadata_label.setStyleSheet(
-            "QLabel { background-color: #f8f9fa; color: #212529; "
-            "border: 1px solid #dee2e6; border-radius: 5px; padding: 10px; }"
-        )
-        metadata_label.setMinimumWidth(180)
-        metadata_label.setMaximumWidth(200)
-        metadata_label.setMinimumHeight(350)
-        content_layout.addWidget(metadata_label)
-
-        # Right: Image scroll area
+        # Image scroll area
         image_scroll = QScrollArea()
         image_scroll.setWidgetResizable(True)
         image_scroll.setMinimumHeight(350)
         image_scroll.setStyleSheet(
-            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }"
-        )
+            "QScrollArea { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; }")
 
-        # Image label
-        image_label = QLabel("ยังไม่มีภาพ")
+        image_label = QLabel("No image")
         image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         image_label.setStyleSheet(
             "QLabel { background-color: #e9ecef; color: #6c757d; "
-            "border: 1px solid #dee2e6; border-radius: 5px; "
-            "padding: 20px; font-size: 12px; }"
-        )
+            "border: 1px solid #dee2e6; border-radius: 5px; padding: 20px; }")
         image_label.setMinimumSize(400, 300)
         image_label.setScaledContents(False)
 
         image_scroll.setWidget(image_label)
-        content_layout.addWidget(image_scroll, 1)  # Give image more space
+        layout.addWidget(image_scroll, 1)
 
-        layout.addLayout(content_layout)
         group.setLayout(layout)
 
         return {
             "group": group,
-            "device_label": device_label,
-            "image_id_label": image_id_label,
-            "zoom_reset_btn": zoom_reset_btn,
-            "image_scroll": image_scroll,
             "image_label": image_label,
-            "metadata_label": metadata_label,
-            "status_label": status_label
+            "image_scroll": image_scroll,
+            "status_label": status_label,
+            "info_label": info_label,
+            "zoom_reset_btn": zoom_reset_btn
         }
 
-    def update_topic_list(self):
-        """Update topic combo box with current topics"""
-        self.topic_combo.clear()
-        self.topic_combo.addItems(self.config.get("topics", []))
-
-    def update_checkbox_list(self):
-        """Update checkbox list with current topics"""
-        # Clear existing checkboxes
-        for checkbox in self.topic_checkboxes:
-            self.topics_checkbox_layout.removeWidget(checkbox)
-            checkbox.deleteLater()
-        self.topic_checkboxes.clear()
-
-        # Create new checkboxes
-        for topic in self.config.get("topics", []):
-            checkbox = QCheckBox(topic)
-            checkbox.setFont(QFont("Arial", 10))
-            checkbox.stateChanged.connect(self.on_topic_selection_changed)
-            self.topics_checkbox_layout.insertWidget(len(self.topic_checkboxes), checkbox)
-            self.topic_checkboxes.append(checkbox)
-
-        self.update_selected_count()
-
-    def on_mode_changed(self):
-        """Handle mode change between Single and Multiple"""
-        is_single_mode = self.single_mode_radio.isChecked()
-
-        # Show/hide appropriate widgets
-        self.single_mode_widget.setVisible(is_single_mode)
-        self.multi_mode_widget.setVisible(not is_single_mode)
-
-        # Save UI state
-        self.save_ui_state()
-
-    def on_select_all_changed(self, state):
-        """Handle Select All checkbox state change"""
-        is_checked = state == Qt.CheckState.Checked.value
-
-        # Block signals to avoid triggering update for each checkbox
-        for checkbox in self.topic_checkboxes:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(is_checked)
-            checkbox.blockSignals(False)
-
-        self.update_selected_count()
-        self.save_ui_state()
-
-    def on_topic_selection_changed(self):
-        """Handle individual topic checkbox state change"""
-        self.update_selected_count()
-        self.save_ui_state()
-
-    def update_selected_count(self):
-        """Update the selected count label"""
-        selected_count = sum(1 for cb in self.topic_checkboxes if cb.isChecked())
-        total_count = len(self.topic_checkboxes)
-        self.selected_count_label.setText(f"Selected: {selected_count}/{total_count}")
-
-        # Update Select All checkbox state
-        if selected_count == 0:
-            self.select_all_checkbox.blockSignals(True)
-            self.select_all_checkbox.setCheckState(Qt.CheckState.Unchecked)
-            self.select_all_checkbox.blockSignals(False)
-        elif selected_count == total_count:
-            self.select_all_checkbox.blockSignals(True)
-            self.select_all_checkbox.setCheckState(Qt.CheckState.Checked)
-            self.select_all_checkbox.blockSignals(False)
-        else:
-            self.select_all_checkbox.blockSignals(True)
-            self.select_all_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
-            self.select_all_checkbox.blockSignals(False)
-
-    def add_topic(self):
-        """Add new topic to the list"""
-        dialog = AddTopicDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_topic = dialog.get_topic()
-            if new_topic:
-                if new_topic not in self.config["topics"]:
-                    self.config["topics"].append(new_topic)
-                    self.save_config()
-                    self.update_topic_list()
-                    self.update_checkbox_list()
-                    self.topic_combo.setCurrentText(new_topic)
-                    self.statusBar.showMessage(f"เพิ่ม topic: {new_topic}", 3000)
-                else:
-                    QMessageBox.warning(self, "Warning", "Topic นี้มีอยู่แล้ว")
-
-    def remove_topic(self):
-        """Remove selected topic from the list"""
-        current_topic = self.topic_combo.currentText()
-        if current_topic:
-            reply = QMessageBox.question(
-                self, "ยืนยัน", f"ต้องการลบ topic '{current_topic}' หรือไม่?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                self.config["topics"].remove(current_topic)
-                self.save_config()
-                self.update_topic_list()
-                self.update_checkbox_list()
-                self.statusBar.showMessage(f"ลบ topic: {current_topic}", 3000)
-
-    def init_mqtt(self):
-        """Initialize MQTT client"""
-        mqtt_config = self.config.get("mqtt", {})
-        self.mqtt_client = MQTTClient(
-            broker=mqtt_config.get("broker", "localhost"),
-            port=mqtt_config.get("port", 1883),
-            username=mqtt_config.get("username", ""),
-            password=mqtt_config.get("password", ""),
-            qos=mqtt_config.get("qos", 1)
-        )
-
-        # Connect signals
-        self.mqtt_client.connected.connect(self.on_mqtt_connected)
-        self.mqtt_client.disconnected.connect(self.on_mqtt_disconnected)
-        self.mqtt_client.message_received.connect(self.on_mqtt_message)
-        self.mqtt_client.connection_error.connect(self.on_mqtt_error)
-
-        # Subscribe to result topic
-        subscribe_topic = self.config.get("subscribe_topic", "mvi/+/result")
-        self.mqtt_client.subscribe(subscribe_topic)
-
-        # Connect to broker
-        self.mqtt_client.connect()
-
-    def on_mqtt_connected(self):
-        """Callback when MQTT connected"""
-        self.connection_label.setText("Connected")
-        self.connection_label.setStyleSheet(
-            "QLabel { background-color: #28a745; color: white; padding: 10px; "
-            "border-radius: 5px; font-weight: bold; }"
-        )
-        self.trigger_btn.setEnabled(True)
-        self.statusBar.showMessage("เชื่อมต่อ MQTT สำเร็จ", 3000)
-
-    def on_mqtt_disconnected(self):
-        """Callback when MQTT disconnected"""
-        self.connection_label.setText("Disconnected")
-        self.connection_label.setStyleSheet(
-            "QLabel { background-color: #dc3545; color: white; padding: 10px; "
-            "border-radius: 5px; font-weight: bold; }"
-        )
-        self.trigger_btn.setEnabled(False)
-        self.statusBar.showMessage("MQTT ถูกตัดการเชื่อมต่อ")
-
-    def on_mqtt_error(self, error_msg):
-        """Callback when MQTT error occurs"""
-        QMessageBox.critical(self, "MQTT Error", f"เกิดข้อผิดพลาด: {error_msg}")
-        self.statusBar.showMessage(f"Error: {error_msg}")
-
-    def on_mqtt_message(self, topic, payload):
-        """Callback when MQTT message received"""
-        try:
-            # Try to parse JSON
-            data = json.loads(payload)
-
-            # IGNORE trigger messages (echo from our own trigger commands)
-            if "action" in data and data.get("action") == "trigger":
-                print(f"🔇 Ignoring trigger message echo from topic: {topic}")
-                return  # Don't process trigger messages
-
-            # FILTER incomplete messages (always, regardless of session state)
-            # Check if message has minimum required identification data
-            has_device_id = bool(data.get("Device ID", "").strip())
-            has_image_path = bool(data.get("Image Path", "").strip())
-            has_image_id = bool(data.get("Image ID", "").strip())
-
-            # Ignore messages without ANY essential identification data
-            if not (has_device_id or has_image_path or has_image_id):
-                print(f"🔇 Ignoring incomplete message from {topic} (no Device ID, Image Path, or Image ID)")
-                return
-
-            # Debug: Print received JSON to console
-            print("\n" + "="*60)
-            print(f"📨 MQTT Message received from topic: {topic}")
-            print("="*60)
-            print(json.dumps(data, indent=2, ensure_ascii=False))
-            print("="*60 + "\n")
-
-            # Extract and display image FIRST (metadata and status will be updated inside display_image)
-            self.display_image(data)
-
-            # Track response for multi-topic trigger (AFTER displaying)
-            # Use flexible response counting instead of strict topic matching
-            if hasattr(self, 'expected_response_count') and self.expected_response_count > 0:
-                # Check if this is a valid inspection result (not external noise)
-                is_valid_result = False
-                device_id = data.get("Device ID", "")
-
-                # Valid result criteria:
-                # 1. Has "Overall Result" field
-                # 2. Either has Device ID or Image Path (not empty messages)
-                if "Overall Result" in data:
-                    if device_id or data.get("Image Path") or data.get("Image ID"):
-                        is_valid_result = True
-
-                        # Check if this device already responded (avoid counting duplicates)
-                        if device_id and device_id in self.devices_received_in_session:
-                            is_valid_result = False
-                            print(f"ℹ️ Duplicate response from device {device_id}, ignoring")
-                        elif device_id:
-                            self.devices_received_in_session.add(device_id)
-
-                if is_valid_result:
-                    self.received_response_count += 1
-                    result_value = self.extract_result_value(data)
-
-                    print(f"✓ Valid inspection result received from {topic}")
-                    print(f"  Device: {device_id or 'unknown'}")
-                    print(f"  Result: {result_value}")
-                    print(f"  Progress: {self.received_response_count}/{self.expected_response_count}")
-
-                    # Check if all expected responses received
-                    if self.received_response_count >= self.expected_response_count:
-                        print("✓ All expected responses received!")
-                        self.trigger_timer.stop()
-                        self.reset_trigger_button()
-                else:
-                    print(f"ℹ️ Message from {topic} doesn't match valid result criteria (likely external message or duplicate)")
-
-        except json.JSONDecodeError:
-            # Not JSON, just log it
-            print(f"⚠️ Non-JSON message: {payload}")
-            self.statusBar.showMessage(f"ได้รับข้อความจาก {topic}", 3000)
-
-    def extract_result_value(self, data):
-        """Extract result value from MVI response data"""
-        # Try to find result field (case-insensitive)
-        for key in data.keys():
-            if key.lower() == "result":
-                return data[key].lower() if isinstance(data[key], str) else "unknown"
-        return "unknown"
-
-    def trigger_inspection(self):
-        """Trigger MVI inspection (single or multiple topics)"""
-        topics_to_trigger = []
-
-        # Determine which topics to trigger based on mode
-        if self.single_mode_radio.isChecked():
-            # Single topic mode
-            current_topic = self.topic_combo.currentText()
-            if not current_topic:
-                QMessageBox.warning(self, "Warning", "กรุณาเลือก topic")
-                return
-            topics_to_trigger = [current_topic]
-        else:
-            # Multiple topics mode
-            for checkbox in self.topic_checkboxes:
-                if checkbox.isChecked():
-                    topics_to_trigger.append(checkbox.text())
-
-            if len(topics_to_trigger) == 0:
-                QMessageBox.warning(self, "Warning", "กรุณาเลือกอย่างน้อย 1 topic")
-                return
-
-        # Initialize pending topics tracking
-        self.pending_topics = set(topics_to_trigger)
-        self.pending_responses = {}
-
-        # Track expected response count for flexible topic matching
-        self.expected_response_count = len(topics_to_trigger)
-        self.received_response_count = 0
-        self.devices_received_in_session = set()  # Track unique devices received
-
-        # Track which cameras have received data in this trigger session
-        # This helps with proper camera assignment in multi-topic mode
-        self.cameras_updated_in_session = set()
-
-        # Update button text
-        if len(topics_to_trigger) == 1:
-            self.trigger_btn.setText("⏳ กำลังตรวจสอบ")
-            print(f"🔘 Button text set to: '⏳ กำลังตรวจสอบ'")
-        else:
-            self.trigger_btn.setText(f"⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)")
-            print(f"🔘 Button text set to: '⏳ กำลังตรวจสอบ ({len(topics_to_trigger)} topics)'")
-
-        self.trigger_btn.setEnabled(False)  # Disable during inspection
-        print(f"🔘 Button disabled: {not self.trigger_btn.isEnabled()}")
-
-        # Start timeout timer (30 seconds)
-        self.trigger_timer.start(30000)  # 30000ms = 30 seconds
-        print(f"⏱️ Timeout timer started: 30 seconds")
-
-        # Prepare trigger message
-        trigger_msg = {
-            "action": "trigger"
-        }
-
-        # Publish trigger to all selected topics
-        success_count = 0
-        for topic in topics_to_trigger:
-            success = self.mqtt_client.publish(topic, trigger_msg)
-            if success:
-                success_count += 1
-                print(f"📤 Trigger sent to: {topic}")
-            else:
-                print(f"❌ Failed to send trigger to: {topic}")
-                # Remove from pending if failed to send
-                self.pending_topics.discard(topic)
-
-        # Show status message
-        if success_count > 0:
-            if len(topics_to_trigger) == 1:
-                self.statusBar.showMessage(f"ส่ง trigger ไปยัง {topics_to_trigger[0]}", 3000)
-            else:
-                self.statusBar.showMessage(
-                    f"ส่ง trigger ไปยัง {success_count}/{len(topics_to_trigger)} topics",
-                    3000
-                )
-        else:
-            QMessageBox.warning(self, "Error", "ไม่สามารถส่ง trigger ได้")
-            # Reset button if all failed
-            self.trigger_timer.stop()
-            self.trigger_btn.setText("🔘 TRIGGER")
-            self.trigger_btn.setEnabled(True)
-            self.pending_topics.clear()
-            self.pending_responses.clear()
-
-    def update_camera_status(self, camera_id, data):
-        """Update status label for specific camera based on Overall Result"""
-        # Get Overall Result
-        result = data.get("Overall Result", data.get("result", "")).lower()
-
-        # Get the appropriate status label
-        if camera_id == "cam1":
-            status_label = self.cam1_status_label
-        else:  # cam2
-            status_label = self.cam2_status_label
-
-        # Update status based on result
-        if result == "pass":
-            status_label.setText("✓ PASS")
-            status_label.setStyleSheet(
-                "QLabel { background-color: #28a745; color: white; "
-                "border-radius: 8px; padding: 15px; }"
-            )
-            status_label.setVisible(True)
-            print(f"✓ {camera_id.upper()}: PASS")
-            # Don't reset button here - let on_mqtt_message() handle it when all topics received
-        elif result == "fail":
-            status_label.setText("✗ FAIL")
-            status_label.setStyleSheet(
-                "QLabel { background-color: #dc3545; color: white; "
-                "border-radius: 8px; padding: 15px; }"
-            )
-            status_label.setVisible(True)
-            print(f"✗ {camera_id.upper()}: FAIL")
-            # Don't reset button here - let on_mqtt_message() handle it when all topics received
-        else:
-            # Try case-insensitive search
-            found = False
-            for key in data.keys():
-                if key.lower() in ["overall result", "result"]:
-                    result_val = str(data[key]).lower()
-                    if result_val == "pass":
-                        status_label.setText("✓ PASS")
-                        status_label.setStyleSheet(
-                            "QLabel { background-color: #28a745; color: white; "
-                            "border-radius: 8px; padding: 15px; }"
-                        )
-                        status_label.setVisible(True)
-                        print(f"✓ {camera_id.upper()}: PASS")
-                        found = True
-                        break
-                    elif result_val == "fail":
-                        status_label.setText("✗ FAIL")
-                        status_label.setStyleSheet(
-                            "QLabel { background-color: #dc3545; color: white; "
-                            "border-radius: 8px; padding: 15px; }"
-                        )
-                        status_label.setVisible(True)
-                        print(f"✗ {camera_id.upper()}: FAIL")
-                        found = True
-                        break
-
-            # Don't reset button here - let on_mqtt_message() handle it when all topics received
-            # Button will be reset by on_mqtt_message() or on_trigger_timeout()
-            if not found:
-                print(f"⚠️ {camera_id.upper()}: No result field found")
-
-    def reset_trigger_button(self):
-        """Reset trigger button to default state"""
-        # Stop timeout timer if running
-        if self.trigger_timer.isActive():
-            self.trigger_timer.stop()
-
-        self.trigger_btn.setText("🔘 TRIGGER")
-        self.trigger_btn.setEnabled(True)
-
-        # Clear tracking variables
-        if hasattr(self, 'cameras_updated_in_session'):
-            self.cameras_updated_in_session.clear()
-        if hasattr(self, 'devices_received_in_session'):
-            self.devices_received_in_session.clear()
-        if hasattr(self, 'expected_response_count'):
-            self.expected_response_count = 0
-            self.received_response_count = 0
-
-        print("🔄 Trigger button reset and session tracking cleared")
-
-    def on_trigger_timeout(self):
-        """Handle trigger timeout (no response received)"""
-        # Get response counts
-        expected = getattr(self, 'expected_response_count', 0)
-        received = getattr(self, 'received_response_count', 0)
-
-        print(f"⏱️ Trigger timeout - Received {received}/{expected} responses")
-
-        # Only show timeout if we didn't receive enough responses
-        if received < expected:
-            self.trigger_btn.setText("🔘 TRIGGER")
-            self.trigger_btn.setEnabled(True)
-
-            # Update status bar
-            if received > 0:
-                self.statusBar.showMessage(
-                    f"⚠️ Timeout: ได้รับผล {received}/{expected} responses",
-                    5000
-                )
-            else:
-                self.statusBar.showMessage("⚠️ Timeout: ไม่ได้รับผลลัพธ์จาก MVI", 5000)
-
-            # Show detailed popup if there were any triggers
-            if expected > 0:
-                self.show_timeout_details_popup()
-
-            # Clear pending state
-            if hasattr(self, 'pending_topics'):
-                self.pending_topics.clear()
-            if hasattr(self, 'pending_responses'):
-                self.pending_responses.clear()
-            if hasattr(self, 'devices_received_in_session'):
-                self.devices_received_in_session.clear()
-            self.expected_response_count = 0
-            self.received_response_count = 0
-        else:
-            print("✓ All responses already received, ignoring timeout")
-
-    def show_timeout_details_popup(self):
-        """Show detailed timeout popup with received/missing topics"""
-        expected = getattr(self, 'expected_response_count', 0)
-        received = getattr(self, 'received_response_count', 0)
-        missing = expected - received
-
-        # Create message box
-        msg_box = QMessageBox(self)
-        msg_box.setIcon(QMessageBox.Icon.Warning)
-        msg_box.setWindowTitle("⚠️ Trigger Timeout")
-
-        if received == 0:
-            msg_box.setText("ไม่ได้รับผลการตรวจสอบภายใน 30 วินาที")
-        else:
-            msg_box.setText(f"ได้รับผลลัพธ์: {received}/{expected} topics")
-
-        # Build details message
-        details = ""
-
-        # Show what we got
-        if received > 0:
-            details += f"✓ ได้รับผลลัพธ์: {received} response(s)\n\n"
-
-        # Show what's missing
-        if missing > 0:
-            details += f"✗ ไม่ได้รับผลลัพธ์ (Timeout): {missing} response(s)\n"
-            if hasattr(self, 'pending_topics') and len(self.pending_topics) > 0:
-                details += "Topics ที่รอ:\n"
-                for topic in sorted(self.pending_topics):
-                    details += f"  ⏱ {topic}\n"
-            details += "\n"
-
-        # Troubleshooting guide
-        details += (
-            "กรุณาตรวจสอบ topics ที่ไม่ได้รับผล:\n\n"
-            "1. ตรวจสอบการเชื่อมต่อ MQTT\n"
-            "   - MQTT Broker ทำงานอยู่หรือไม่\n"
-            "   - IP Address และ Port ใน config.json\n\n"
-            "2. ตรวจสอบ Login เข้า MVI Edge\n"
-            "   - Session ยังคงใช้งานได้อยู่\n\n"
-            "3. ตรวจสอบ Inspection Status\n"
-            "   - Inspection เปิดใช้งานใน MVI Edge\n"
-            "   - Model พร้อมใช้งาน"
-        )
-
-        msg_box.setInformativeText(details)
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        msg_box.exec()
-
-    def display_metadata(self, camera_id, data):
-        """Display metadata from MVI inspection result for specific camera"""
-        # Define metadata fields to display (in Thai)
-        # Each field can have multiple possible keys (case-insensitive)
-        metadata_fields = {
-            "Device ID": ["Device ID", "device_id", "DeviceID", "deviceId"],
-            "Image ID": ["ImageID", "image_id", "imageId", "Image ID"],
-            "Station": ["Station name", "station_name", "StationName", "station", "Station"],
-            "Inspection": ["Inspection name", "inspection_name", "InspectionName", "inspection"],
-            "วันที่": ["Capture date", "capture_date", "Date sent", "date"],
-            "เวลา": ["Capture time", "capture_time", "Time sent", "time"]
-        }
-
-        # Build metadata display text
-        metadata_text = ""
-        metadata_found = False
-
-        # Collect all possible nested structures
-        nested_objects = [
-            data,  # Main level
-            data.get("mvidata", {}),  # MVI Server metadata
-            data.get("Alert", {}),  # Alert structure
-            data.get("Inherited metadata", {}),  # Inherited metadata
-            data.get("metadata", {}),  # Generic metadata
-        ]
-
-        # Search for each field in all nested structures
-        for thai_label, possible_keys in metadata_fields.items():
-            value = None
-
-            # Try each possible key in each nested object
-            for nested_obj in nested_objects:
-                if not isinstance(nested_obj, dict):
-                    continue
-
-                for key in possible_keys:
-                    if key in nested_obj and nested_obj[key]:
-                        value = nested_obj[key]
-                        break
-
-                if value:
+    def load_product_list(self):
+        current_data = self.product_combo.currentData()
+        self.product_combo.clear()
+        self.product_combo.addItem("-- No Product --", None)
+
+        products = self.component_manager.list_products()
+        for p in products:
+            self.product_combo.addItem(
+                f"{p['name']} ({p['component_count']} parts)", p['id'])
+
+        # Restore selection
+        if current_data:
+            for i in range(self.product_combo.count()):
+                if self.product_combo.itemData(i) == current_data:
+                    self.product_combo.setCurrentIndex(i)
                     break
 
-            if value:
-                metadata_found = True
-                # Format the value (truncate if too long)
-                value_str = str(value)
-                if len(value_str) > 60:
-                    value_str = value_str[:57] + "..."
-                metadata_text += f"<b>{thai_label}:</b> {value_str}<br>"
+    # ═══════════════════════════════════════════
+    #  CAMERA HANDLERS
+    # ═══════════════════════════════════════════
 
-        # Always check for Rule Results array (whether other metadata found or not)
-        if "Rule Results" in data:
-            rule_results = data.get("Rule Results", [])
-            if isinstance(rule_results, list) and len(rule_results) > 0:
-                metadata_found = True
+    def _parse_camera_source(self, combo: QComboBox):
+        """Parse camera source from combo box selection"""
+        text = combo.currentText()
+        if text.startswith("USB:"):
+            return int(text.split(":")[1])
+        elif text == "RTSP URL":
+            url, ok = self._ask_rtsp_url()
+            return url if ok else None
+        elif text == "Image File":
+            return "file"
+        elif text == "None":
+            return None
+        return 0
 
-                # Add separator if there's already metadata
-                if metadata_text:
-                    metadata_text += "<br>"
+    def _ask_rtsp_url(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("RTSP URL")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("RTSP URL:"))
+        url_input = QLineEdit()
+        url_input.setPlaceholderText("rtsp://user:pass@192.168.1.100:554/stream")
+        layout.addWidget(url_input)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
 
-                metadata_text += "<b>Rules:</b><br>"
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return url_input.text().strip(), True
+        return "", False
 
-                for i, rule in enumerate(rule_results, 1):
-                    if isinstance(rule, dict):
-                        rule_name = rule.get("Rule Name", "Unknown")
-                        result_type = rule.get("Result Type", "unknown")
+    def on_connect_camera(self):
+        src1 = self._parse_camera_source(self.cam1_source)
+        if src1 == "file":
+            self.status_bar.showMessage("Use 'Load Image File' button for file inspection")
+            return
+        if src1 is not None:
+            self.camera_manager.open_camera(0, src1)
 
-                        # Shorten rule name if too long (remove common prefixes)
-                        display_name = rule_name.replace("Check_", "").replace("_", " ")
-                        if len(display_name) > 25:
-                            display_name = display_name[:22] + "..."
+        src2 = self._parse_camera_source(self.cam2_source)
+        if src2 is not None and src2 != "file":
+            self.camera_manager.open_camera(1, src2)
 
-                        # Color code the result
-                        if result_type.lower() == "pass":
-                            color = "#28a745"  # Green
-                            icon = "✓"
-                        elif result_type.lower() == "fail":
-                            color = "#dc3545"  # Red
-                            icon = "✗"
-                        else:
-                            color = "#6c757d"  # Gray
-                            icon = "?"
+    def on_disconnect_camera(self):
+        if self._realtime_running:
+            self.on_start_stop_realtime()  # Stop realtime first
+        self.camera_manager.close_all()
 
-                        metadata_text += f'  <span style="color: {color}; font-weight: bold;">{icon}</span> {display_name}<br>'
+    def on_camera_opened(self, camera_id):
+        self.cam_status_label.setText(f"Connected (Cam {camera_id})")
+        self.cam_status_label.setStyleSheet(
+            "QLabel { background-color: #28a745; color: white; padding: 5px; "
+            "border-radius: 3px; font-weight: bold; }")
+        self.connect_cam_btn.setEnabled(False)
+        self.disconnect_cam_btn.setEnabled(True)
+        self.trigger_btn.setEnabled(True)
+        self.status_bar.showMessage(f"Camera {camera_id} connected")
 
-        # If still no metadata found, show default message
-        if not metadata_found:
-            metadata_text = "<i>ยังไม่มีข้อมูล</i>"
-            print(f"⚠️ {camera_id.upper()}: ไม่พบ metadata ที่ตรงกัน")
+    def on_camera_closed(self, camera_id):
+        if not self.camera_manager.cameras:
+            self.cam_status_label.setText("Disconnected")
+            self.cam_status_label.setStyleSheet(
+                "QLabel { background-color: #dc3545; color: white; padding: 5px; "
+                "border-radius: 3px; font-weight: bold; }")
+            self.connect_cam_btn.setEnabled(True)
+            self.disconnect_cam_btn.setEnabled(False)
 
-        # Get the appropriate metadata label for this camera
-        if camera_id == "cam1":
-            metadata_label = self.cam1_metadata_label
-        else:  # cam2
-            metadata_label = self.cam2_metadata_label
+    def on_camera_error(self, camera_id, error):
+        self.status_bar.showMessage(f"Camera {camera_id} error: {error}")
 
-        # Update metadata label with HTML formatting
-        metadata_label.setText(metadata_text)
+    # ═══════════════════════════════════════════
+    #  MODEL HANDLERS
+    # ═══════════════════════════════════════════
 
-    def display_image(self, data):
-        """Display image from MVI inspection result with dual camera support"""
-        # Get Device ID to determine which camera
-        device_id = data.get("Device ID", "")
+    def on_browse_model(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select YOLO Model", "",
+            "YOLO Models (*.pt *.onnx);;All Files (*)")
+        if file_path:
+            self.config["model"]["path"] = file_path
+            self.model_path_label.setText(os.path.basename(file_path))
+            self.save_config()
 
-        # Get Image ID
-        image_id = data.get("Image ID", "")
+    def on_load_model(self):
+        model_path = self.config.get("model", {}).get("path", "")
+        if not model_path:
+            QMessageBox.warning(self, "Warning", "Please select a model file first")
+            return
 
-        # Get Image Path
-        image_path = data.get("Image Path", "")
+        if not os.path.exists(model_path):
+            QMessageBox.warning(self, "Warning", f"Model file not found:\n{model_path}")
+            return
 
-        # Get Detected Objects
-        detected_objects = data.get("Detected Objects", [])
-
-        # Determine which camera to update based on Device ID
-        # If no device ID mapping exists, assign to first available camera
-        camera_id = None
-
-        if device_id:
-            # Check if this device_id is already assigned to a camera
-            if self.cam1_device_id == device_id:
-                camera_id = "cam1"
-            elif self.cam2_device_id == device_id:
-                camera_id = "cam2"
-            elif self.cam1_device_id is None:
-                # Assign to camera 1 if empty
-                camera_id = "cam1"
-                self.cam1_device_id = device_id
-            elif self.cam2_device_id is None:
-                # Assign to camera 2 if empty
-                camera_id = "cam2"
-                self.cam2_device_id = device_id
-            else:
-                # Both cameras occupied, show on cam1 temporarily but DON'T override device_id
-                # This allows seeing new device data without losing existing camera assignments
-                camera_id = "cam1"
-                print(f"⚠️ Both cameras occupied. Showing {device_id} on cam1 temporarily (cam1 still assigned to {self.cam1_device_id})")
+        device_text = self.device_combo.currentText()
+        if device_text.startswith("0"):
+            device = "0"
+        elif device_text == "cpu":
+            device = "cpu"
         else:
-            # No device ID provided - use order of reception for multi-topic mode
-            # Check which camera has been updated in this trigger session
-            if hasattr(self, 'cameras_updated_in_session'):
-                if "cam1" not in self.cameras_updated_in_session:
-                    # Camera 1 hasn't been updated in this session, use it
-                    camera_id = "cam1"
-                elif "cam2" not in self.cameras_updated_in_session:
-                    # Camera 1 updated, Camera 2 not yet, use Camera 2
-                    camera_id = "cam2"
-                else:
-                    # Both cameras updated in this session, use cam1
-                    camera_id = "cam1"
-                    print("⚠️ Both cameras already updated in this session. Showing new result on cam1.")
-            else:
-                # Fallback to cam1 if tracking variable doesn't exist
-                camera_id = "cam1"
+            device = "auto"
 
-        print(f"📷 Displaying on {camera_id.upper()}: Device={device_id}, Image={image_id}")
+        self.model_status_label.setText("Loading model...")
+        self.load_model_btn.setEnabled(False)
+        QApplication.processEvents()
 
-        # Get the appropriate widgets for this camera
-        if camera_id == "cam1":
-            image_label = self.cam1_image_label
-            image_id_label = self.cam1_image_id_label
-            device_label = self.cam1_device_label
-            zoom_reset_btn = self.cam1_zoom_reset_btn
-        else:  # cam2
-            image_label = self.cam2_image_label
-            image_id_label = self.cam2_image_id_label
-            device_label = self.cam2_device_label
-            zoom_reset_btn = self.cam2_zoom_reset_btn
+        success = self.detection_engine.load_model(model_path, device)
+        self.load_model_btn.setEnabled(True)
 
-        # Update labels
-        if device_id:
-            device_label.setText(f"Device: {device_id}")
+        if not success:
+            self.model_status_label.setText("Failed to load model")
+
+    def on_model_loaded(self, info_str):
+        self.model_status_label.setText(f"Loaded: {info_str}")
+        self.model_status_label.setStyleSheet("color: #28a745; font-size: 11px; font-weight: bold;")
+        self.status_bar.showMessage(f"Model loaded: {info_str}")
+
+    def on_model_error(self, error):
+        self.model_status_label.setText(f"Error: {error}")
+        self.model_status_label.setStyleSheet("color: #dc3545; font-size: 11px;")
+        QMessageBox.warning(self, "Model Error", error)
+
+    def on_confidence_changed(self, value):
+        conf = value / 100.0
+        self.conf_label.setText(f"{conf:.2f}")
+        self.detection_engine.set_confidence(conf)
+        self.config["model"]["confidence"] = conf
+
+    # ═══════════════════════════════════════════
+    #  MODE & PRODUCT HANDLERS
+    # ═══════════════════════════════════════════
+
+    def on_mode_changed(self):
+        is_capture = self.capture_radio.isChecked()
+        self.trigger_btn.setVisible(is_capture)
+        self.load_file_btn.setVisible(is_capture)
+        self.start_stop_btn.setVisible(not is_capture)
+        self.fps_label.setVisible(not is_capture)
+
+        if is_capture:
+            self.inspection_controller.set_mode("capture")
         else:
-            device_label.setText("Device: -")
+            self.inspection_controller.set_mode("realtime")
 
-        if image_id:
-            image_id_label.setText(f"Image: {image_id}")
+        self.save_ui_state()
+
+    def on_product_changed(self, index):
+        product_id = self.product_combo.currentData()
+        if product_id:
+            self.inspection_controller.set_product(product_id)
+            expected = self.inspection_controller.get_expected_class_names()
+            self.expected_label.setText(f"Expected: {', '.join(expected)}")
         else:
-            image_id_label.setText("Image: -")
+            self.inspection_controller.current_product_id = None
+            self.inspection_controller.expected_parts = []
+            self.inspection_controller.expected_class_names = set()
+            self.expected_label.setText("Expected: -")
+        self.save_ui_state()
 
-        # Update metadata for this camera
-        self.display_metadata(camera_id, data)
+    # ═══════════════════════════════════════════
+    #  CAPTURE MODE
+    # ═══════════════════════════════════════════
 
-        # Update status for this camera
-        self.update_camera_status(camera_id, data)
+    def on_trigger(self):
+        if not self.detection_engine.is_model_loaded():
+            QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
+            return
 
-        # Track latest camera
-        self.latest_camera = camera_id
+        self.trigger_btn.setText("Inspecting...")
+        self.trigger_btn.setEnabled(False)
+        QApplication.processEvents()
 
-        # Track which camera was updated in this trigger session (for multi-topic mode)
-        if hasattr(self, 'cameras_updated_in_session'):
-            self.cameras_updated_in_session.add(camera_id)
-            print(f"📝 Camera {camera_id} marked as updated. Session cameras: {self.cameras_updated_in_session}")
+        self.inspection_controller.trigger_capture(0)
 
-        # Save to history (will save after image is loaded)
-        image_pixmap_for_history = None
+        self.trigger_btn.setText("TRIGGER")
+        self.trigger_btn.setEnabled(True)
 
-        # Try to load and display image
-        if image_path and os.path.exists(image_path):
-            try:
-                pixmap = QPixmap(image_path)
+    def on_load_image_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)")
+        if not file_path:
+            return
 
-                if not pixmap.isNull():
-                    # Draw bounding boxes if detected objects exist
-                    if detected_objects and isinstance(detected_objects, list) and len(detected_objects) > 0:
-                        pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
-                        print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
+        if not self.detection_engine.is_model_loaded():
+            QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
+            return
 
-                    # Save pixmap for history
-                    image_pixmap_for_history = pixmap
+        self.trigger_btn.setText("Inspecting...")
+        self.trigger_btn.setEnabled(False)
+        QApplication.processEvents()
 
-                    # Store original pixmap and reset zoom to 25%
-                    if camera_id == "cam1":
-                        self.cam1_pixmap = pixmap
-                        self.cam1_zoom = 0.25
-                    else:
-                        self.cam2_pixmap = pixmap
-                        self.cam2_zoom = 0.25
+        self.inspection_controller.trigger_capture_from_file(file_path)
 
-                    zoom_reset_btn.setText("25%")
+        self.trigger_btn.setText("TRIGGER")
+        self.trigger_btn.setEnabled(True)
 
-                    # Apply current zoom level
-                    self.camera_apply_zoom(camera_id)
+    # ═══════════════════════════════════════════
+    #  REALTIME MODE
+    # ═══════════════════════════════════════════
 
-                    print(f"✓ โหลดภาพสำเร็จ: {image_path} (ขนาดต้นฉบับ: {pixmap.width()}x{pixmap.height()})")
-                else:
-                    image_label.clear()
-                    image_label.setText(f"ไม่สามารถโหลดภาพได้\n{image_path}")
-                    print(f"⚠️ ไม่สามารถโหลดภาพ: {image_path}")
+    def on_start_stop_realtime(self):
+        if not self._realtime_running:
+            # START
+            if not self.detection_engine.is_model_loaded():
+                QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
+                return
+            if not self.camera_manager.is_opened(0):
+                QMessageBox.warning(self, "Warning", "Please connect a camera first")
+                return
 
-            except Exception as e:
-                image_label.clear()
-                image_label.setText(f"เกิดข้อผิดพลาดในการโหลดภาพ\n{str(e)}")
-                print(f"❌ Error loading image: {e}")
+            self._realtime_running = True
+            self.start_stop_btn.setText("STOP")
+            self.start_stop_btn.setStyleSheet(
+                "QPushButton { background-color: #dc3545; color: white; border-radius: 5px; }"
+                "QPushButton:hover { background-color: #c82333; }")
+            self.trigger_btn.setEnabled(False)
 
-        elif image_path:
-            # Path provided but file doesn't exist
-            image_label.clear()
-            image_label.setText(f"ไม่พบไฟล์ภาพ\n{image_path}")
-            image_label.setStyleSheet(
-                "QLabel { background-color: #e9ecef; color: #6c757d; "
-                "border: 1px solid #dee2e6; border-radius: 5px; "
-                "padding: 20px; font-size: 12px; }"
-            )
-            print(f"⚠️ ไม่พบไฟล์ภาพ: {image_path}")
-
+            self.inspection_controller.start_realtime(0)
         else:
-            # No image path provided
-            image_label.clear()
-            image_label.setText("ยังไม่มีภาพ")
-            image_label.setStyleSheet(
-                "QLabel { background-color: #e9ecef; color: #6c757d; "
-                "border: 1px solid #dee2e6; border-radius: 5px; "
-                "padding: 20px; font-size: 12px; }"
-            )
-            print("ℹ️ ไม่มี Image Path ในข้อมูล MQTT")
+            # STOP
+            self._realtime_running = False
+            self.start_stop_btn.setText("START")
+            self.start_stop_btn.setStyleSheet(
+                "QPushButton { background-color: #28a745; color: white; border-radius: 5px; }"
+                "QPushButton:hover { background-color: #218838; }")
+            self.trigger_btn.setEnabled(True)
+            self.fps_label.setText("")
 
-        # Save to history database
-        try:
-            self.history_manager.save_inspection(data, image_pixmap_for_history)
-            # Refresh history tab if it's visible
-            if self.tabs.currentIndex() == 1:  # History tab
-                self.history_widget.load_history()
-        except Exception as e:
-            print(f"⚠️ Failed to save to history: {e}")
+            self.inspection_controller.stop_realtime(0)
 
-    def draw_bounding_boxes(self, pixmap, detected_objects):
-        """Draw bounding boxes, labels, and scores on image"""
-        # Create a copy of pixmap to draw on
-        result_pixmap = QPixmap(pixmap)
-        painter = QPainter(result_pixmap)
+    # ═══════════════════════════════════════════
+    #  RESULT DISPLAY
+    # ═══════════════════════════════════════════
 
-        try:
-            # Enable antialiasing for smoother lines
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    def on_inspection_result(self, result):
+        status = result.get("status", "UNKNOWN")
+        found = result.get("found_count", 0)
+        total = result.get("total_expected", 0)
+        missing = result.get("missing_parts", [])
+        inf_time = result.get("inference_time_ms", 0)
 
-            for obj in detected_objects:
-                if not isinstance(obj, dict):
-                    continue
+        # Update result status
+        if status == "PASS":
+            self.result_status_label.setText("PASS")
+            self.result_status_label.setStyleSheet(
+                "QLabel { background-color: #28a745; color: white; "
+                "border-radius: 8px; padding: 10px; }")
+        elif status == "FAIL":
+            self.result_status_label.setText("FAIL")
+            self.result_status_label.setStyleSheet(
+                "QLabel { background-color: #dc3545; color: white; "
+                "border-radius: 8px; padding: 10px; }")
+        else:
+            self.result_status_label.setText(status)
+            self.result_status_label.setStyleSheet(
+                "QLabel { background-color: #ffc107; color: #212529; "
+                "border-radius: 8px; padding: 10px; }")
 
-                # Get bounding box coordinates
-                rectangle = obj.get("rectangle", {})
-                min_point = rectangle.get("min", {})
-                max_point = rectangle.get("max", {})
+        # Detail text
+        detail = f"Found: {found}/{total}" if total > 0 else f"Detected: {found}"
+        if missing:
+            detail += f"\nMissing: {', '.join(missing)}"
+        detail += f"\nInference: {inf_time:.1f} ms"
+        self.result_detail_label.setText(detail)
 
-                x1 = min_point.get("x", 0)
-                y1 = min_point.get("y", 0)
-                x2 = max_point.get("x", 0)
-                y2 = max_point.get("y", 0)
+        # Update camera status label
+        camera_id = result.get("camera_id", 0)
+        cam_status = self.cam1_status_label if camera_id == 0 else self.cam2_status_label
 
-                # Get label and score
-                label = obj.get("label", "Unknown")
-                score = obj.get("score", 0.0)
+        if status == "PASS":
+            cam_status.setText("PASS")
+            cam_status.setStyleSheet(
+                "QLabel { background-color: #28a745; color: white; "
+                "border-radius: 8px; padding: 10px; }")
+            cam_status.setVisible(True)
+        elif status == "FAIL":
+            cam_status.setText("FAIL")
+            cam_status.setStyleSheet(
+                "QLabel { background-color: #dc3545; color: white; "
+                "border-radius: 8px; padding: 10px; }")
+            cam_status.setVisible(True)
 
-                # Calculate width and height
-                width = x2 - x1
-                height = y2 - y1
+        # Camera info
+        info_label = self.cam1_info_label if camera_id == 0 else self.cam2_info_label
+        info_label.setText(f"{result.get('product_name', '')} | {inf_time:.0f}ms")
 
-                if width <= 0 or height <= 0:
-                    continue
+        # Refresh history if visible
+        if self.tabs.currentIndex() == 1:
+            self.history_widget.load_history()
 
-                # Choose color based on score (red for low, yellow for medium, green for high)
-                if score >= 0.8:
-                    color = QColor(40, 167, 69)  # Green #28a745
-                elif score >= 0.5:
-                    color = QColor(255, 193, 7)  # Yellow #ffc107
-                else:
-                    color = QColor(220, 53, 69)  # Red #dc3545
+        self.status_bar.showMessage(
+            f"Inspection: {status} | Found {found}/{total} | {inf_time:.1f}ms")
 
-                # Draw bounding box
-                pen = QPen(color, 3)  # 3px thick line
-                painter.setPen(pen)
-                painter.drawRect(int(x1), int(y1), int(width), int(height))
+    def on_frame_display(self, camera_id, frame):
+        """Display annotated frame from InspectionController"""
+        pixmap = numpy_to_qpixmap(frame)
 
-                # Prepare label text
-                label_text = f"{label} {score:.2f}"
+        if camera_id == 0:
+            self.cam1_pixmap = pixmap
+            self.camera_apply_zoom("cam1")
+        else:
+            self.cam2_pixmap = pixmap
+            self.camera_apply_zoom("cam2")
 
-                # Draw label background (filled rectangle)
-                font = QFont("Arial", 12, QFont.Weight.Bold)
-                painter.setFont(font)
-                metrics = painter.fontMetrics()
-                text_width = metrics.horizontalAdvance(label_text) + 10
-                text_height = metrics.height() + 6
+    def on_status_changed(self, status):
+        self.status_bar.showMessage(f"Status: {status}")
 
-                # Position label above box (or below if near top edge)
-                label_y = int(y1) - text_height if y1 > text_height + 5 else int(y1) + int(height) + text_height
+    def on_error(self, error):
+        self.status_bar.showMessage(f"Error: {error}")
 
-                # Draw label background
-                painter.fillRect(int(x1), label_y - text_height + 3, text_width, text_height, color)
+    def on_fps_updated(self, fps):
+        self.fps_label.setText(f"FPS: {fps:.1f}")
 
-                # Draw label text
-                painter.setPen(QPen(Qt.GlobalColor.white))
-                painter.drawText(int(x1) + 5, label_y - 3, label_text)
-
-        finally:
-            painter.end()
-
-        return result_pixmap
+    # ═══════════════════════════════════════════
+    #  ZOOM CONTROLS (kept from original)
+    # ═══════════════════════════════════════════
 
     def camera_apply_zoom(self, camera_id):
-        """Apply current zoom level to camera image"""
         if camera_id == "cam1":
-            pixmap = self.cam1_pixmap
-            zoom_level = self.cam1_zoom
-            image_label = self.cam1_image_label
-            zoom_reset_btn = self.cam1_zoom_reset_btn
-        else:  # cam2
-            pixmap = self.cam2_pixmap
-            zoom_level = self.cam2_zoom
-            image_label = self.cam2_image_label
-            zoom_reset_btn = self.cam2_zoom_reset_btn
+            pixmap, zoom = self.cam1_pixmap, self.cam1_zoom
+            image_label, zoom_btn = self.cam1_image_label, self.cam1_zoom_reset_btn
+        else:
+            pixmap, zoom = self.cam2_pixmap, self.cam2_zoom
+            image_label, zoom_btn = self.cam2_image_label, self.cam2_zoom_reset_btn
 
         if pixmap and not pixmap.isNull():
-            # Calculate new size based on zoom level
-            new_width = int(pixmap.width() * zoom_level)
-            new_height = int(pixmap.height() * zoom_level)
-
-            # Scale pixmap
-            scaled_pixmap = pixmap.scaled(
-                new_width, new_height,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-
-            image_label.setPixmap(scaled_pixmap)
+            new_w = int(pixmap.width() * zoom)
+            new_h = int(pixmap.height() * zoom)
+            scaled = pixmap.scaled(new_w, new_h,
+                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+            image_label.setPixmap(scaled)
             image_label.setStyleSheet(
-                "QLabel { background-color: #e9ecef; "
-                "border: 1px solid #dee2e6; border-radius: 5px; }"
-            )
-            image_label.resize(scaled_pixmap.size())
-
-            # Update zoom button text
-            zoom_reset_btn.setText(f"{int(zoom_level * 100)}%")
+                "QLabel { background-color: #e9ecef; border: 1px solid #dee2e6; border-radius: 5px; }")
+            image_label.resize(scaled.size())
+            zoom_btn.setText(f"{int(zoom * 100)}%")
 
     def camera_zoom_in(self, camera_id):
-        """Zoom in on camera image"""
-        if camera_id == "cam1":
-            if self.cam1_pixmap:
-                self.cam1_zoom = min(self.cam1_zoom + 0.25, 5.0)  # Max 500%
-                self.camera_apply_zoom(camera_id)
-                print(f"🔍 CAM1 Zoom In: {int(self.cam1_zoom * 100)}%")
-        else:  # cam2
-            if self.cam2_pixmap:
-                self.cam2_zoom = min(self.cam2_zoom + 0.25, 5.0)  # Max 500%
-                self.camera_apply_zoom(camera_id)
-                print(f"🔍 CAM2 Zoom In: {int(self.cam2_zoom * 100)}%")
+        if camera_id == "cam1" and self.cam1_pixmap:
+            self.cam1_zoom = min(self.cam1_zoom + 0.25, 5.0)
+        elif camera_id == "cam2" and self.cam2_pixmap:
+            self.cam2_zoom = min(self.cam2_zoom + 0.25, 5.0)
+        self.camera_apply_zoom(camera_id)
 
     def camera_zoom_out(self, camera_id):
-        """Zoom out on camera image"""
-        if camera_id == "cam1":
-            if self.cam1_pixmap:
-                self.cam1_zoom = max(self.cam1_zoom - 0.25, 0.25)  # Min 25%
-                self.camera_apply_zoom(camera_id)
-                print(f"🔍 CAM1 Zoom Out: {int(self.cam1_zoom * 100)}%")
-        else:  # cam2
-            if self.cam2_pixmap:
-                self.cam2_zoom = max(self.cam2_zoom - 0.25, 0.25)  # Min 25%
-                self.camera_apply_zoom(camera_id)
-                print(f"🔍 CAM2 Zoom Out: {int(self.cam2_zoom * 100)}%")
+        if camera_id == "cam1" and self.cam1_pixmap:
+            self.cam1_zoom = max(self.cam1_zoom - 0.25, 0.25)
+        elif camera_id == "cam2" and self.cam2_pixmap:
+            self.cam2_zoom = max(self.cam2_zoom - 0.25, 0.25)
+        self.camera_apply_zoom(camera_id)
 
     def camera_zoom_reset(self, camera_id):
-        """Reset camera zoom to 25%"""
-        if camera_id == "cam1":
-            if self.cam1_pixmap:
-                self.cam1_zoom = 0.25
-                self.camera_apply_zoom(camera_id)
-                print(f"🔍 CAM1 Zoom Reset: 25%")
-        else:  # cam2
-            if self.cam2_pixmap:
-                self.cam2_zoom = 0.25
-                self.camera_apply_zoom(camera_id)
-                print(f"🔍 CAM2 Zoom Reset: 25%")
+        if camera_id == "cam1" and self.cam1_pixmap:
+            self.cam1_zoom = 0.25
+        elif camera_id == "cam2" and self.cam2_pixmap:
+            self.cam2_zoom = 0.25
+        self.camera_apply_zoom(camera_id)
 
     def camera_show_fullscreen(self, camera_id):
-        """Show camera image in fullscreen mode"""
-        if camera_id == "cam1":
-            pixmap = self.cam1_pixmap
-            image_id = self.cam1_image_id_label.text()
-            device_id = self.cam1_device_label.text()
-        else:  # cam2
-            pixmap = self.cam2_pixmap
-            image_id = self.cam2_image_id_label.text()
-            device_id = self.cam2_device_label.text()
-
+        pixmap = self.cam1_pixmap if camera_id == "cam1" else self.cam2_pixmap
         if pixmap and not pixmap.isNull():
-            fullscreen_dialog = FullscreenImageDialog(pixmap, f"{device_id} | {image_id}", self)
-            fullscreen_dialog.exec()
+            dialog = FullscreenImageDialog(pixmap, camera_id, self)
+            dialog.exec()
+
+    # ═══════════════════════════════════════════
+    #  KEYBOARD & CLOSE
+    # ═══════════════════════════════════════════
 
     def keyPressEvent(self, event):
-        """Handle keyboard shortcuts"""
-        # Space bar triggers inspection when trigger button has focus
-        if event.key() == Qt.Key.Key_Space and self.trigger_btn.hasFocus():
-            self.trigger_inspection()
+        if event.key() == Qt.Key.Key_Space and self.trigger_btn.isVisible():
+            self.on_trigger()
         else:
             super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        """Handle window close event"""
-        if self.mqtt_client:
-            self.mqtt_client.disconnect()
+        if self._realtime_running:
+            self.inspection_controller.stop_realtime(0)
+        self.camera_manager.close_all()
+        self.save_ui_state()
         event.accept()
 
 
 class FullscreenImageDialog(QDialog):
     """Fullscreen dialog for displaying image"""
 
-    def __init__(self, pixmap, image_id, parent=None):
+    def __init__(self, pixmap, title, parent=None):
         super().__init__(parent)
         self.pixmap = pixmap
         self.zoom_level = 1.0
-
-        # Mouse drag variables
         self.dragging = False
         self.last_pos = None
 
-        self.setWindowTitle("Full Screen View")
+        self.setWindowTitle(f"Full Screen - {title}")
         self.setModal(True)
-
-        # Set to fullscreen
         self.showMaximized()
 
-        # Layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # Top toolbar
+        # Toolbar
         toolbar = QHBoxLayout()
-
-        # Image ID
-        id_label = QLabel(image_id)
-        id_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
-        id_label.setStyleSheet("QLabel { color: #495057; }")
-        toolbar.addWidget(id_label)
-
         toolbar.addStretch()
 
-        # Zoom controls
-        zoom_out_btn = QPushButton("🔍-")
-        zoom_out_btn.setMaximumWidth(50)
+        zoom_out_btn = QPushButton("-")
+        zoom_out_btn.setMaximumWidth(40)
         zoom_out_btn.clicked.connect(self.zoom_out)
         toolbar.addWidget(zoom_out_btn)
 
@@ -1508,95 +949,69 @@ class FullscreenImageDialog(QDialog):
         self.zoom_label.clicked.connect(self.zoom_reset)
         toolbar.addWidget(self.zoom_label)
 
-        zoom_in_btn = QPushButton("🔍+")
-        zoom_in_btn.setMaximumWidth(50)
+        zoom_in_btn = QPushButton("+")
+        zoom_in_btn.setMaximumWidth(40)
         zoom_in_btn.clicked.connect(self.zoom_in)
         toolbar.addWidget(zoom_in_btn)
 
-        # Close button
-        close_btn = QPushButton("✕ Close")
-        close_btn.setMaximumWidth(80)
+        close_btn = QPushButton("Close")
+        close_btn.setMaximumWidth(60)
         close_btn.clicked.connect(self.close)
         toolbar.addWidget(close_btn)
 
         layout.addLayout(toolbar)
 
-        # Scroll area for image
+        # Image
         self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(False)  # Allow manual scrolling
-        self.scroll_area.setStyleSheet(
-            "QScrollArea { background-color: #2b2b2b; border: none; }"
-        )
-        # Enable mouse tracking for drag functionality
-        self.scroll_area.setMouseTracking(True)
-        self.scroll_area.viewport().setMouseTracking(True)
+        self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setStyleSheet("QScrollArea { background-color: #2b2b2b; border: none; }")
 
-        # Image label
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setStyleSheet("QLabel { background-color: #2b2b2b; }")
         self.image_label.setScaledContents(False)
-        self.image_label.setMouseTracking(True)
 
         self.scroll_area.setWidget(self.image_label)
         layout.addWidget(self.scroll_area)
 
-        # Display image
         self.apply_zoom()
 
-        # Set dark style
         self.setStyleSheet("""
-            QDialog {
-                background-color: #2b2b2b;
-            }
+            QDialog { background-color: #2b2b2b; }
             QPushButton {
-                background-color: #444;
-                color: white;
-                border: none;
-                border-radius: 3px;
-                padding: 5px 10px;
+                background-color: #444; color: white; border: none;
+                border-radius: 3px; padding: 5px 10px;
             }
-            QPushButton:hover {
-                background-color: #555;
-            }
+            QPushButton:hover { background-color: #555; }
         """)
 
     def apply_zoom(self):
-        """Apply zoom to fullscreen image"""
         if self.pixmap and not self.pixmap.isNull():
-            new_width = int(self.pixmap.width() * self.zoom_level)
-            new_height = int(self.pixmap.height() * self.zoom_level)
-
-            scaled_pixmap = self.pixmap.scaled(
-                new_width, new_height,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-
-            self.image_label.setPixmap(scaled_pixmap)
-            self.image_label.resize(scaled_pixmap.size())
+            new_w = int(self.pixmap.width() * self.zoom_level)
+            new_h = int(self.pixmap.height() * self.zoom_level)
+            scaled = self.pixmap.scaled(new_w, new_h,
+                                        Qt.AspectRatioMode.KeepAspectRatio,
+                                        Qt.TransformationMode.SmoothTransformation)
+            self.image_label.setPixmap(scaled)
+            self.image_label.resize(scaled.size())
             self.zoom_label.setText(f"{int(self.zoom_level * 100)}%")
 
     def zoom_in(self):
-        """Zoom in"""
-        self.zoom_level = min(self.zoom_level + 0.25, 10.0)  # Max 1000% in fullscreen
+        self.zoom_level = min(self.zoom_level + 0.25, 10.0)
         self.apply_zoom()
 
     def zoom_out(self):
-        """Zoom out"""
-        self.zoom_level = max(self.zoom_level - 0.25, 0.1)  # Min 10%
+        self.zoom_level = max(self.zoom_level - 0.25, 0.1)
         self.apply_zoom()
 
     def zoom_reset(self):
-        """Reset zoom"""
         self.zoom_level = 1.0
         self.apply_zoom()
 
     def keyPressEvent(self, event):
-        """Handle keyboard shortcuts"""
         if event.key() == Qt.Key.Key_Escape:
             self.close()
-        elif event.key() == Qt.Key.Key_Plus or event.key() == Qt.Key.Key_Equal:
+        elif event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.zoom_in()
         elif event.key() == Qt.Key.Key_Minus:
             self.zoom_out()
@@ -1606,42 +1021,29 @@ class FullscreenImageDialog(QDialog):
             super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
-        """Handle mouse press for drag start"""
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
             self.last_pos = event.pos()
             self.scroll_area.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        """Handle mouse move for dragging"""
         if self.dragging and self.last_pos:
-            # Calculate the delta movement
             delta = event.pos() - self.last_pos
             self.last_pos = event.pos()
-
-            # Get current scroll bar positions
-            h_scroll = self.scroll_area.horizontalScrollBar()
-            v_scroll = self.scroll_area.verticalScrollBar()
-
-            # Update scroll positions (negative delta because dragging moves content in opposite direction)
-            h_scroll.setValue(h_scroll.value() - delta.x())
-            v_scroll.setValue(v_scroll.value() - delta.y())
-
-        super().mouseMoveEvent(event)
+            h_bar = self.scroll_area.horizontalScrollBar()
+            v_bar = self.scroll_area.verticalScrollBar()
+            h_bar.setValue(h_bar.value() - delta.x())
+            v_bar.setValue(v_bar.value() - delta.y())
 
     def mouseReleaseEvent(self, event):
-        """Handle mouse release for drag end"""
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = False
             self.scroll_area.viewport().setCursor(Qt.CursorShape.ArrowCursor)
-        super().mouseReleaseEvent(event)
 
 
 def main():
-    """Main application entry point"""
     app = QApplication(sys.argv)
-    window = MVITriggerGUI()
+    window = InspectionGUI()
     window.show()
     sys.exit(app.exec())
 
