@@ -202,8 +202,8 @@ class InspectionGUI(QMainWindow):
         self.camera_settings_widget.connect_requested.connect(self.on_connect_from_profile)
         self.tabs.addTab(self.camera_settings_widget, "Camera Settings")
 
-        # Update active profile label now that widget is ready
-        self._update_active_profile_label()
+        # Populate camera profile combos now that widget is ready
+        self._populate_camera_combos()
 
         # Component Definition Tab
         if COMPONENT_DEF_AVAILABLE:
@@ -239,24 +239,29 @@ class InspectionGUI(QMainWindow):
 
         # --- Camera Settings ---
         cam_group = QGroupBox("Camera")
-        cam_layout = QVBoxLayout()
+        cam_layout = QGridLayout()
 
-        # Active profile display
-        self.active_profile_label = QLabel("No profile")
-        self.active_profile_label.setStyleSheet("color: #495057; font-size: 11px;")
-        cam_layout.addWidget(self.active_profile_label)
+        # Cam 1 profile combo
+        cam_layout.addWidget(QLabel("Cam 1:"), 0, 0)
+        self.cam1_profile_combo = QComboBox()
+        cam_layout.addWidget(self.cam1_profile_combo, 0, 1)
 
-        # Open Profiles button
+        # Cam 2 profile combo
+        cam_layout.addWidget(QLabel("Cam 2:"), 1, 0)
+        self.cam2_profile_combo = QComboBox()
+        cam_layout.addWidget(self.cam2_profile_combo, 1, 1)
+
+        # Manage profiles button
         self.open_profiles_btn = QPushButton("Camera Profiles...")
         self.open_profiles_btn.setStyleSheet(
             "QPushButton { background-color: #007bff; color: white; padding: 6px; }"
             "QPushButton:hover { background-color: #0056b3; }")
         self.open_profiles_btn.clicked.connect(self.on_open_camera_profiles)
-        cam_layout.addWidget(self.open_profiles_btn)
+        cam_layout.addWidget(self.open_profiles_btn, 2, 0, 1, 2)
 
         # Connect / Disconnect
         cam_btn_layout = QHBoxLayout()
-        self.connect_cam_btn = QPushButton("Connect Default")
+        self.connect_cam_btn = QPushButton("Connect")
         self.connect_cam_btn.setStyleSheet(
             "QPushButton { background-color: #28a745; color: white; padding: 6px; font-weight: bold; }"
             "QPushButton:hover { background-color: #218838; }")
@@ -270,13 +275,13 @@ class InspectionGUI(QMainWindow):
         self.disconnect_cam_btn.clicked.connect(self.on_disconnect_camera)
         self.disconnect_cam_btn.setEnabled(False)
         cam_btn_layout.addWidget(self.disconnect_cam_btn)
-        cam_layout.addLayout(cam_btn_layout)
+        cam_layout.addLayout(cam_btn_layout, 3, 0, 1, 2)
 
         self.cam_status_label = QLabel("Disconnected")
         self.cam_status_label.setStyleSheet(
             "QLabel { background-color: #dc3545; color: white; padding: 5px; "
             "border-radius: 3px; font-weight: bold; }")
-        cam_layout.addWidget(self.cam_status_label)
+        cam_layout.addWidget(self.cam_status_label, 4, 0, 1, 2)
 
         cam_group.setLayout(cam_layout)
         left_layout.addWidget(cam_group)
@@ -549,19 +554,26 @@ class InspectionGUI(QMainWindow):
     #  CAMERA HANDLERS
     # ═══════════════════════════════════════════
 
-    def _update_active_profile_label(self):
-        """Update active profile display label"""
-        profile = self.camera_settings_widget.get_active_profile()
-        if profile:
-            name = profile.get("name", "")
-            cam_type = profile.get("type", "usb").upper()
-            self.active_profile_label.setText(f"Active: {name} [{cam_type}]")
-        else:
-            self.active_profile_label.setText("No default profile set")
+    def _populate_camera_combos(self):
+        """Populate Cam 1 / Cam 2 combo boxes from camera_profiles.json"""
+        profiles = self.camera_settings_widget.get_all_profiles()
+
+        for combo in [self.cam1_profile_combo, self.cam2_profile_combo]:
+            current_text = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("-- None --")
+            for name in profiles.keys():
+                combo.addItem(name)
+            # Restore previous selection if possible
+            idx = combo.findText(current_text)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
 
     def on_camera_config_changed(self):
         """เมื่อ Camera Settings เปลี่ยน — refresh UI"""
-        self._update_active_profile_label()
+        self._populate_camera_combos()
         self.status_bar.showMessage("Camera profiles updated")
 
     def on_open_camera_profiles(self):
@@ -574,23 +586,54 @@ class InspectionGUI(QMainWindow):
         success = self.camera_manager.connect_from_profile(0, profile)
         if not success:
             self.status_bar.showMessage(f"Failed to connect: {profile.get('name', '')}")
-        self._update_active_profile_label()
+        self._populate_camera_combos()
         # Switch back to Live tab
         self.tabs.setCurrentIndex(0)
 
+    def _get_profile_by_name(self, profile_name: str):
+        """Get profile data dict by name from camera_profiles.json"""
+        profiles = self.camera_settings_widget.get_all_profiles()
+        profile_data = profiles.get(profile_name)
+        if profile_data:
+            return {"name": profile_name, **profile_data}
+        return None
+
     def on_connect_camera(self):
-        """Connect using active (default) profile"""
-        profile = self.camera_settings_widget.get_active_profile()
-        if profile:
-            self.status_bar.showMessage(f"Connecting: {profile.get('name', '')}...")
-            self.camera_manager.connect_from_profile(0, profile)
-        else:
-            from camera_settings_widget import CameraProfilesDialog
+        """Connect cameras using Cam 1 / Cam 2 combo selections"""
+        cam1_name = self.cam1_profile_combo.currentText()
+        cam2_name = self.cam2_profile_combo.currentText()
+
+        has_cam1 = cam1_name and cam1_name != "-- None --"
+        has_cam2 = cam2_name and cam2_name != "-- None --"
+
+        if not has_cam1 and not has_cam2:
             QMessageBox.information(
-                self, "No Profile",
-                "No default camera profile set.\n"
-                "Please open Camera Profiles to add and set a default profile.")
-            self.on_open_camera_profiles()
+                self, "No Profile Selected",
+                "Please select a camera profile for Cam 1 or Cam 2.\n"
+                "Use 'Camera Profiles...' to add profiles.")
+            return
+
+        connected = False
+        if has_cam1:
+            profile = self._get_profile_by_name(cam1_name)
+            if profile:
+                self.status_bar.showMessage(f"Connecting Cam 1: {cam1_name}...")
+                if self.camera_manager.connect_from_profile(0, profile):
+                    connected = True
+                else:
+                    self.status_bar.showMessage(f"Failed to connect Cam 1: {cam1_name}")
+
+        if has_cam2:
+            profile = self._get_profile_by_name(cam2_name)
+            if profile:
+                self.status_bar.showMessage(f"Connecting Cam 2: {cam2_name}...")
+                if self.camera_manager.connect_from_profile(1, profile):
+                    connected = True
+                else:
+                    self.status_bar.showMessage(f"Failed to connect Cam 2: {cam2_name}")
+
+        if not connected:
+            self.status_bar.showMessage("Failed to connect cameras")
 
     def on_disconnect_camera(self):
         if self._realtime_running:
@@ -598,14 +641,17 @@ class InspectionGUI(QMainWindow):
         self.camera_manager.close_all()
 
     def on_camera_opened(self, camera_id):
-        self.cam_status_label.setText(f"Connected (Cam {camera_id})")
+        # Build status text showing all connected cameras
+        connected_ids = list(self.camera_manager.cameras.keys())
+        cam_names = [f"Cam {cid+1}" for cid in connected_ids]
+        self.cam_status_label.setText(f"Connected: {', '.join(cam_names)}")
         self.cam_status_label.setStyleSheet(
             "QLabel { background-color: #28a745; color: white; padding: 5px; "
             "border-radius: 3px; font-weight: bold; }")
         self.connect_cam_btn.setEnabled(False)
         self.disconnect_cam_btn.setEnabled(True)
         self.trigger_btn.setEnabled(True)
-        self.status_bar.showMessage(f"Camera {camera_id} connected")
+        self.status_bar.showMessage(f"Camera {camera_id} (Cam {camera_id+1}) connected")
 
     def on_camera_closed(self, camera_id):
         if not self.camera_manager.cameras:

@@ -23,22 +23,21 @@ class GigEBackend(BaseCameraBackend):
     def __init__(self):
         super().__init__()
 
-        if not HARVESTERS_AVAILABLE:
-            raise RuntimeError(
-                "Harvesters library is not installed. "
-                "Install with: pip install harvesters genicam")
-
-        self.harvester: Optional[Harvester] = None
+        self.harvester = None
         self.image_acquirer = None
         self.is_running = False
-        self.current_frame: Optional[np.ndarray] = None
+        self.current_frame = None
         self.frame_lock = threading.Lock()
-        self.capture_thread: Optional[threading.Thread] = None
-
+        self.capture_thread = None
         self.frame_count = 0
         self.fps = 0
         self.last_fps_time = time.time()
         self.fps_frame_count = 0
+
+        if not HARVESTERS_AVAILABLE:
+            raise RuntimeError(
+                "Harvesters library is not installed. "
+                "Install with: pip install harvesters genicam")
 
     def connect(self, source: Any, width: int = 1280, height: int = 720,
                 fps: int = 30, **kwargs) -> bool:
