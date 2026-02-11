@@ -71,6 +71,62 @@ class AnomalyEngine(QObject):
     #  INITIALIZATION
     # ═══════════════════════════════════════════
 
+    # Common locations to search for ResNet18 weights
+    RESNET18_WEIGHT_FILENAME = "resnet18-f37072fd.pth"
+    RESNET18_WEIGHT_SEARCH_PATHS = [
+        # Torch hub cache (default download location)
+        Path.home() / ".cache" / "torch" / "hub" / "checkpoints",
+        # Project-local models directory
+        Path(__file__).parent / "models",
+        # Working directory
+        Path.cwd() / "models",
+    ]
+
+    def _load_resnet18_backbone(self):
+        """
+        โหลด ResNet18 backbone — รองรับ offline (ไม่มี internet)
+
+        ลำดับการโหลด:
+        1. ลอง weights=DEFAULT (ใช้ cache ถ้ามี, หรือ download ถ้ามีเน็ต)
+        2. ถ้าล้มเหลว → หาไฟล์ .pth ใน local paths
+        3. ถ้าไม่เจอ → ใช้ random weights (ผลลัพธ์แย่ลง แต่ยังทำงานได้)
+        """
+        # --- Attempt 1: standard load (uses cache or downloads) ---
+        try:
+            backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+            print("ResNet18: loaded with pre-trained weights (cache/download)")
+            return backbone
+        except Exception as e:
+            print(f"ResNet18: standard load failed — {e}")
+
+        # --- Attempt 2: load from local .pth file ---
+        for search_dir in self.RESNET18_WEIGHT_SEARCH_PATHS:
+            weight_path = search_dir / self.RESNET18_WEIGHT_FILENAME
+            if weight_path.is_file():
+                try:
+                    backbone = models.resnet18(weights=None)
+                    state_dict = torch.load(
+                        str(weight_path), map_location="cpu", weights_only=True
+                    )
+                    backbone.load_state_dict(state_dict)
+                    print(f"ResNet18: loaded weights from {weight_path}")
+                    return backbone
+                except Exception as e2:
+                    print(f"ResNet18: failed to load from {weight_path} — {e2}")
+
+        # --- Attempt 3: random weights (functional but less accurate) ---
+        self.training_progress.emit(
+            "Warning: ใช้ random weights (ไม่มี pre-trained) — "
+            "ผลลัพธ์อาจแย่ลง ควรคัดลอก resnet18-f37072fd.pth มาวางที่ models/"
+        )
+        print(
+            "ResNet18: WARNING — using random weights (no pre-trained).\n"
+            "  To fix: copy resnet18-f37072fd.pth to one of:\n"
+            f"  {[str(p / self.RESNET18_WEIGHT_FILENAME) for p in self.RESNET18_WEIGHT_SEARCH_PATHS]}"
+        )
+        backbone = models.resnet18(weights=None)
+        return backbone
+
     def initialize(self, device: str = "auto") -> bool:
         """โหลด pre-trained ResNet สำหรับ feature extraction"""
         if not TORCH_AVAILABLE:
@@ -83,8 +139,8 @@ class AnomalyEngine(QObject):
             else:
                 self.device = device
 
-            # Load pre-trained ResNet18 (fast, good features)
-            backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+            # Load ResNet18 (supports offline / no-internet machines)
+            backbone = self._load_resnet18_backbone()
             backbone.eval()
             backbone.to(self.device)
 
