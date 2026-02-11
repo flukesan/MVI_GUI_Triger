@@ -649,7 +649,7 @@ class InspectionGUI(QMainWindow):
         left_layout.addWidget(step1)
 
         cap_row = QHBoxLayout()
-        self.anomaly_capture_btn = QPushButton("Capture from Camera")
+        self.anomaly_capture_btn = QPushButton("Capture")
         self.anomaly_capture_btn.setStyleSheet(
             "QPushButton { background-color: #28a745; color: white; padding: 8px; }"
             "QPushButton:hover { background-color: #218838; }")
@@ -706,33 +706,47 @@ class InspectionGUI(QMainWindow):
         left_group.setLayout(left_layout)
         content.addWidget(left_group)
 
-        # ─── Right: Info ───
-        right_group = QGroupBox("How it works")
+        # ─── Right: Camera Preview ───
+        right_group = QGroupBox("Camera Preview")
         right_layout = QVBoxLayout()
 
-        info = QLabel(
-            "PatchCore Algorithm:\n\n"
-            "1. Extract deep features (ResNet18) จากภาพปกติ\n"
-            "2. สร้าง Memory Bank เก็บ patch features\n"
-            "3. ภาพใหม่ → เทียบ features กับ Memory Bank\n"
-            "4. Patch ที่ห่างจาก normal = Anomaly\n\n"
-            "YOLO Hybrid Mode:\n"
-            "• YOLO detect ชิ้นงานก่อน → Crop\n"
-            "• PatchCore ตรวจ anomaly บน crop\n"
-            "• ไม่ไวต่อตำแหน่งที่เปลี่ยน\n\n"
-            "Tips:\n"
-            "• ใช้ภาพปกติ 10-30 ภาพ (ยิ่งมากยิ่งดี)\n"
-            "• ถ่ายจากมุมเดียวกัน แสงคล้ายกัน\n"
-            "• ปรับ Threshold ตาม sensitivity ที่ต้องการ\n"
-            "  (ค่าต่ำ = ไวมาก, ค่าสูง = ทนทาน)")
-        info.setStyleSheet("color: #495057; font-size: 12px;")
-        info.setWordWrap(True)
-        right_layout.addWidget(info)
-        right_layout.addStretch()
+        # Preview controls
+        preview_row = QHBoxLayout()
+        self.anomaly_preview_btn = QPushButton("Start Preview")
+        self.anomaly_preview_btn.setStyleSheet(
+            "QPushButton { background-color: #17a2b8; color: white; padding: 8px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background-color: #138496; }")
+        self.anomaly_preview_btn.clicked.connect(self.on_anomaly_preview_toggle)
+        preview_row.addWidget(self.anomaly_preview_btn)
+        right_layout.addLayout(preview_row)
+
+        # Preview image
+        self.anomaly_preview_label = QLabel("Camera not started\nClick 'Start Preview' to begin")
+        self.anomaly_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.anomaly_preview_label.setMinimumSize(480, 360)
+        self.anomaly_preview_label.setStyleSheet(
+            "QLabel { background-color: #1a1a2e; color: #6c757d; "
+            "border: 2px solid #333; border-radius: 5px; font-size: 14px; }")
+        right_layout.addWidget(self.anomaly_preview_label, 1)
+
+        # Tips
+        tips = QLabel(
+            "Tips: ใช้ภาพปกติ 10-30 ภาพ | ถ่ายจากมุมเดียวกัน แสงคล้ายกัน | "
+            "ปรับ Threshold ตาม sensitivity ที่ต้องการ")
+        tips.setStyleSheet("color: #6c757d; font-size: 11px;")
+        tips.setWordWrap(True)
+        right_layout.addWidget(tips)
+
         right_group.setLayout(right_layout)
-        content.addWidget(right_group)
+        content.addWidget(right_group, 1)  # stretch=1 ให้ preview กินพื้นที่มากกว่า
 
         layout.addLayout(content)
+
+        # Preview state
+        self._anomaly_preview_active = False
+        self._anomaly_latest_frame = None
+
         return widget
 
     # ═══════════════════════════════════════════
@@ -757,14 +771,85 @@ class InspectionGUI(QMainWindow):
         anomaly = self._ensure_anomaly_initialized()
         anomaly.set_yolo_crop(bool(state))
 
+    # ─── Camera Preview for Anomaly Training ───
+
+    def on_anomaly_preview_toggle(self):
+        """Start/Stop camera preview ใน Anomaly Training tab"""
+        if self._anomaly_preview_active:
+            self._anomaly_preview_stop()
+        else:
+            self._anomaly_preview_start()
+
+    def _anomaly_preview_start(self):
+        """Start camera stream for anomaly preview"""
+        if not self.camera_manager.is_opened(0):
+            QMessageBox.warning(self, "Error",
+                "Camera not connected.\nPlease open camera in Camera Settings first.")
+            return
+
+        # Stop realtime if running (avoid conflicts)
+        if self._realtime_running:
+            self.on_start_stop_realtime()
+
+        self._anomaly_preview_active = True
+        self._anomaly_latest_frame = None
+        self.anomaly_preview_btn.setText("Stop Preview")
+        self.anomaly_preview_btn.setStyleSheet(
+            "QPushButton { background-color: #dc3545; color: white; padding: 8px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background-color: #c82333; }")
+
+        # Connect camera frames to our preview handler
+        self.camera_manager.frame_captured.connect(self._on_anomaly_preview_frame)
+        self.camera_manager.start_stream(0, 30)
+        self.status_bar.showMessage("Anomaly Training: Camera preview started")
+
+    def _anomaly_preview_stop(self):
+        """Stop camera preview"""
+        self._anomaly_preview_active = False
+
+        try:
+            self.camera_manager.frame_captured.disconnect(self._on_anomaly_preview_frame)
+        except (TypeError, RuntimeError):
+            pass
+
+        self.camera_manager.stop_stream(0)
+
+        self.anomaly_preview_btn.setText("Start Preview")
+        self.anomaly_preview_btn.setStyleSheet(
+            "QPushButton { background-color: #17a2b8; color: white; padding: 8px; "
+            "font-weight: bold; }"
+            "QPushButton:hover { background-color: #138496; }")
+        self.status_bar.showMessage("Anomaly Training: Camera preview stopped")
+
+    def _on_anomaly_preview_frame(self, camera_id: int, frame):
+        """Display camera frame in anomaly preview label"""
+        if not self._anomaly_preview_active or camera_id != 0:
+            return
+
+        self._anomaly_latest_frame = frame.copy()
+
+        # Convert and display in preview label
+        pixmap = numpy_to_qpixmap(frame)
+        label_size = self.anomaly_preview_label.size()
+        scaled = pixmap.scaled(label_size, Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+        self.anomaly_preview_label.setPixmap(scaled)
+
     def on_anomaly_capture_normal(self):
         """Capture ภาพปกติจากกล้อง"""
         anomaly = self._ensure_anomaly_initialized()
 
-        # Capture from camera 0
-        frame = self.camera_manager.capture_frame(0)
+        # Use latest preview frame if preview is active, otherwise single capture
+        if self._anomaly_preview_active and self._anomaly_latest_frame is not None:
+            frame = self._anomaly_latest_frame.copy()
+        else:
+            frame = self.camera_manager.capture_frame(0)
+
         if frame is None:
-            QMessageBox.warning(self, "Error", "Cannot capture from camera.\nPlease connect camera first.")
+            QMessageBox.warning(self, "Error",
+                "Cannot capture from camera.\n"
+                "Please click 'Start Preview' first or connect camera.")
             return
 
         # If YOLO crop enabled and model loaded, crop first
@@ -790,8 +875,14 @@ class InspectionGUI(QMainWindow):
             count = anomaly.add_normal_image(frame)
             self.anomaly_train_count_label.setText(f"Normal images: {count}")
 
-        # Show preview
-        self.frame_display.emit(0, frame)
+        # Flash preview border green to indicate capture
+        self.anomaly_preview_label.setStyleSheet(
+            "QLabel { background-color: #1a1a2e; color: #6c757d; "
+            "border: 3px solid #28a745; border-radius: 5px; }")
+        QTimer.singleShot(300, lambda: self.anomaly_preview_label.setStyleSheet(
+            "QLabel { background-color: #1a1a2e; color: #6c757d; "
+            "border: 2px solid #333; border-radius: 5px; }"))
+
         self.status_bar.showMessage(
             f"Captured normal image (total: {anomaly.get_training_count()})")
 
@@ -1187,6 +1278,10 @@ class InspectionGUI(QMainWindow):
                 QMessageBox.warning(self, "Warning", "Please connect a camera first")
                 return
 
+            # Stop anomaly preview if running (avoid conflicts)
+            if self._anomaly_preview_active:
+                self._anomaly_preview_stop()
+
             self._realtime_running = True
             self.start_stop_btn.setText("STOP")
             self.start_stop_btn.setStyleSheet(
@@ -1352,6 +1447,8 @@ class InspectionGUI(QMainWindow):
             super().keyPressEvent(event)
 
     def closeEvent(self, event):
+        if self._anomaly_preview_active:
+            self._anomaly_preview_stop()
         if self._realtime_running:
             self.inspection_controller.stop_realtime(0)
         self.camera_manager.close_all()
