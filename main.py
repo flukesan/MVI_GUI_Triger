@@ -356,6 +356,19 @@ class InspectionGUI(QMainWindow):
         mode_row.addStretch()
         insp_layout.addLayout(mode_row)
 
+        # Detect FPS slider (Realtime mode)
+        detect_fps_row = QHBoxLayout()
+        detect_fps_row.addWidget(QLabel("Detect FPS:"))
+        self.detect_fps_slider = QSlider(Qt.Orientation.Horizontal)
+        self.detect_fps_slider.setRange(1, 30)
+        self.detect_fps_slider.setValue(30)
+        self.detect_fps_slider.valueChanged.connect(self.on_detect_fps_changed)
+        detect_fps_row.addWidget(self.detect_fps_slider)
+        self.detect_fps_label = QLabel("30")
+        self.detect_fps_label.setMinimumWidth(25)
+        detect_fps_row.addWidget(self.detect_fps_label)
+        insp_layout.addLayout(detect_fps_row)
+
         # Product
         product_row = QHBoxLayout()
         product_row.addWidget(QLabel("Product:"))
@@ -769,12 +782,18 @@ class InspectionGUI(QMainWindow):
     #  MODE & PRODUCT HANDLERS
     # ═══════════════════════════════════════════
 
+    def on_detect_fps_changed(self, value):
+        self.detect_fps_label.setText(str(value))
+        self.inspection_controller.set_inspect_fps(value)
+
     def on_mode_changed(self):
         is_capture = self.capture_radio.isChecked()
         self.trigger_btn.setVisible(is_capture)
         self.load_file_btn.setVisible(is_capture)
         self.start_stop_btn.setVisible(not is_capture)
         self.fps_label.setVisible(not is_capture)
+        self.detect_fps_slider.setVisible(not is_capture)
+        self.detect_fps_label.setVisible(not is_capture)
 
         if is_capture:
             self.inspection_controller.set_mode("capture")

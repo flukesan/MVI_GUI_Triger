@@ -98,7 +98,7 @@ class InspectionController(QObject):
         self.expected_class_names: Set[str] = set()
 
         self.is_streaming: bool = False
-        self.inspect_fps: int = 10              # ความถี่ในการ detect (Realtime mode)
+        self.inspect_fps: int = 30              # ความถี่ในการ detect (Realtime mode)
         self.save_pass_images: bool = False
         self.save_fail_images: bool = True
 
@@ -110,6 +110,10 @@ class InspectionController(QObject):
         # Frame skip สำหรับ Realtime mode
         self._frame_skip_counter = 0
         self._last_result: Optional[dict] = None
+
+        # Cached detection results for smooth overlay
+        self._cached_detections: List[dict] = []
+        self._cached_missing_parts: Optional[List[dict]] = None
 
         # Background detection worker
         self._detection_worker: Optional[DetectionWorker] = None
@@ -245,6 +249,8 @@ class InspectionController(QObject):
         self._frame_count = 0
         self._fps_start_time = time.time()
         self._frame_skip_counter = 0
+        self._cached_detections = []
+        self._cached_missing_parts = None
 
         # Create and start detection worker (background thread)
         self._detection_worker = DetectionWorker(self.detector)
@@ -282,12 +288,29 @@ class InspectionController(QObject):
         print("Realtime stopped")
 
     def _on_realtime_frame(self, camera_id: int, frame: np.ndarray):
-        """เรียกทุกเฟรมจากกล้อง — แสดง preview ทุกเฟรม, detect เฉพาะเฟรมที่เลือก"""
+        """เรียกทุกเฟรมจากกล้อง — แสดง preview ทุกเฟรม + overlay cached detection"""
         if not self.is_streaming:
             return
 
-        # ═══ แสดง live preview ทุกเฟรม (ไม่ต้องรอ detection) ═══
-        self.frame_display.emit(camera_id, frame)
+        # ═══ แสดง live preview ทุกเฟรม พร้อม overlay ผล detection ล่าสุด ═══
+        if self._cached_detections or self._cached_missing_parts:
+            display_frame = self.detector.draw_detections(
+                frame.copy(),
+                self._cached_detections,
+                self._cached_missing_parts
+            )
+        else:
+            display_frame = frame
+        self.frame_display.emit(camera_id, display_frame)
+
+        # ═══ FPS calculation (นับทุกเฟรมที่แสดง) ═══
+        self._frame_count += 1
+        elapsed = time.time() - self._fps_start_time
+        if elapsed >= 1.0:
+            self._current_fps = self._frame_count / elapsed
+            self.fps_updated.emit(self._current_fps)
+            self._frame_count = 0
+            self._fps_start_time = time.time()
 
         # ═══ Frame skip — ส่ง detect เฉพาะเฟรมที่เลือก ═══
         stream_fps = 30
@@ -306,18 +329,9 @@ class InspectionController(QObject):
             self._detecting = True
             self._detection_worker.submit_frame(camera_id, frame.copy())
 
-        # FPS calculation
-        self._frame_count += 1
-        elapsed = time.time() - self._fps_start_time
-        if elapsed >= 1.0:
-            self._current_fps = self._frame_count / elapsed
-            self.fps_updated.emit(self._current_fps)
-            self._frame_count = 0
-            self._fps_start_time = time.time()
-
     def _on_detection_done(self, camera_id: int, frame: np.ndarray,
                             detection: dict, _unused):
-        """เรียกเมื่อ background detection เสร็จ — annotate + emit result"""
+        """เรียกเมื่อ background detection เสร็จ — cache ผลไว้ overlay บนเฟรมถัดไป"""
         if not self.is_streaming:
             return
 
@@ -325,17 +339,19 @@ class InspectionController(QObject):
 
         result = self._compare_with_expected(detection, camera_id, frame)
 
+        # ═══ Cache detection results สำหรับ overlay บนเฟรมถัดไป ═══
+        self._cached_detections = detection.get("detections", [])
+        self._cached_missing_parts = result.get("missing_parts_detail")
+
+        # Annotate frame for result/history
         annotated = self.detector.draw_detections(
             frame.copy(),
-            detection["detections"],
-            result.get("missing_parts_detail")
+            self._cached_detections,
+            self._cached_missing_parts
         )
         result["annotated_image"] = annotated
 
-        # แสดงภาพ annotated (ทับ preview)
-        self.frame_display.emit(camera_id, annotated)
-
-        # Emit result
+        # Emit result (ไม่ emit frame_display ที่นี่ — _on_realtime_frame จะ overlay ให้แล้ว)
         self.inspection_result.emit(result)
         self._last_result = result
 
