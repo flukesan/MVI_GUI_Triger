@@ -438,8 +438,8 @@ class AnomalyEngine(QObject):
             annotated, status_text, (10, 10 + label_size[1]),
             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
 
-        # Threshold line
-        thr_text = f"Threshold: {self.threshold:.1f}"
+        # Threshold + mode line
+        thr_text = f"Threshold: {self.threshold:.1f} | Mode: Standalone (whole image)"
         cv2.putText(
             annotated, thr_text,
             (10, 30 + label_size[1] + 20),
@@ -469,7 +469,13 @@ class AnomalyEngine(QObject):
             }
         """
         if not detections:
-            return self.predict(image)
+            print("predict_on_crops: no detections — returning empty result")
+            return {
+                "anomaly_score": 0.0,
+                "is_anomaly": False,
+                "crop_results": [],
+                "inference_time_ms": 0.0
+            }
 
         start_time = time.time()
         crop_results = []
@@ -556,11 +562,15 @@ class AnomalyEngine(QObject):
         # Global status badge
         max_score = crops_result.get("anomaly_score", 0)
         is_anomaly = crops_result.get("is_anomaly", False)
+        n_crops = len(crops_result.get("crop_results", []))
         status = f"ANOMALY {max_score:.2f}" if is_anomaly else f"NORMAL {max_score:.2f}"
         color = (0, 0, 220) if is_anomaly else (0, 200, 0)
-        cv2.rectangle(annotated, (5, 5), (250, 40), color, -1)
+        cv2.rectangle(annotated, (5, 5), (420, 65), color, -1)
         cv2.putText(annotated, status, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        mode_text = f"YOLO Hybrid | {n_crops} crops | Thr: {self.threshold:.1f}"
+        cv2.putText(annotated, mode_text, (10, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         return annotated
 

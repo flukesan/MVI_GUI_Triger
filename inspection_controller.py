@@ -498,14 +498,30 @@ class InspectionController(QObject):
             return None
 
         # 2. YOLO crop + Anomaly detect (hybrid) or whole image
-        if self.anomaly.use_yolo_crop and self.detector.is_model_loaded():
+        use_crop = self.anomaly.use_yolo_crop and self.detector.is_model_loaded()
+
+        if self.anomaly.use_yolo_crop and not self.detector.is_model_loaded():
+            print("WARNING: YOLO Crop enabled but YOLO model NOT loaded → fallback to standalone")
+            self.error_occurred.emit(
+                "YOLO Crop enabled but YOLO model not loaded — using whole image mode")
+
+        if use_crop:
             # YOLO detect first → crop → anomaly on each crop
             detection = self.detector.detect(frame)
-            anomaly_result = self.anomaly.predict_on_crops(
-                frame, detection["detections"])
-            annotated = self.anomaly.annotate_crops_result(frame, anomaly_result)
+            det_count = len(detection["detections"])
+            print(f"Anomaly YOLO Hybrid: detected {det_count} objects")
+
+            if det_count > 0:
+                anomaly_result = self.anomaly.predict_on_crops(
+                    frame, detection["detections"])
+                annotated = self.anomaly.annotate_crops_result(frame, anomaly_result)
+            else:
+                print("WARNING: YOLO detected 0 objects → fallback to standalone")
+                anomaly_result = self.anomaly.predict(frame)
+                annotated = self.anomaly.annotate_result(frame, anomaly_result)
         else:
             # Anomaly on whole image (no YOLO)
+            print("Anomaly Standalone: checking whole image")
             anomaly_result = self.anomaly.predict(frame)
             annotated = self.anomaly.annotate_result(frame, anomaly_result)
 
@@ -557,12 +573,25 @@ class InspectionController(QObject):
             self.status_changed.emit("ready")
             return None
 
-        if self.anomaly.use_yolo_crop and self.detector.is_model_loaded():
+        use_crop = self.anomaly.use_yolo_crop and self.detector.is_model_loaded()
+
+        if self.anomaly.use_yolo_crop and not self.detector.is_model_loaded():
+            print("WARNING: YOLO Crop enabled but YOLO model NOT loaded → fallback to standalone")
+
+        if use_crop:
             detection = self.detector.detect(frame)
-            anomaly_result = self.anomaly.predict_on_crops(
-                frame, detection["detections"])
-            annotated = self.anomaly.annotate_crops_result(frame, anomaly_result)
+            det_count = len(detection["detections"])
+            print(f"Anomaly from file — YOLO Hybrid: detected {det_count} objects")
+
+            if det_count > 0:
+                anomaly_result = self.anomaly.predict_on_crops(
+                    frame, detection["detections"])
+                annotated = self.anomaly.annotate_crops_result(frame, anomaly_result)
+            else:
+                anomaly_result = self.anomaly.predict(frame)
+                annotated = self.anomaly.annotate_result(frame, anomaly_result)
         else:
+            print("Anomaly from file — Standalone: checking whole image")
             anomaly_result = self.anomaly.predict(frame)
             annotated = self.anomaly.annotate_result(frame, anomaly_result)
 
