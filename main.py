@@ -14,7 +14,7 @@ try:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget,
-        QRadioButton, QSlider, QFileDialog, QSplitter
+        QRadioButton, QSlider, QFileDialog, QSplitter, QCheckBox
     )
     from PyQt6.QtCore import Qt, QTimer, QSize
     from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter, QPen, QImage
@@ -24,7 +24,7 @@ except ImportError:
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QComboBox, QLabel, QLineEdit, QDialog, QDialogButtonBox,
         QMessageBox, QGroupBox, QGridLayout, QStatusBar, QScrollArea, QTabWidget,
-        QRadioButton, QSlider, QFileDialog, QSplitter
+        QRadioButton, QSlider, QFileDialog, QSplitter, QCheckBox
     )
     from PySide6.QtCore import Qt, QTimer, QSize
     from PySide6.QtGui import QFont, QColor, QPixmap, QPainter, QPen, QImage
@@ -40,6 +40,7 @@ from component_definition import ComponentDefinitionManager
 from history_manager import HistoryManager
 from history_widget import HistoryWidget
 from camera_settings_widget import CameraSettingsWidget
+from anomaly_engine import AnomalyEngine
 
 try:
     from component_definition_widget import ComponentDefinitionWidget
@@ -205,6 +206,10 @@ class InspectionGUI(QMainWindow):
         # Populate camera profile combos now that widget is ready
         self._populate_camera_combos()
 
+        # Anomaly Training Tab
+        self.anomaly_tab = self._create_anomaly_tab()
+        self.tabs.addTab(self.anomaly_tab, "Anomaly Training")
+
         # Component Definition Tab
         if COMPONENT_DEF_AVAILABLE:
             self.component_def_widget = ComponentDefinitionWidget()
@@ -349,15 +354,20 @@ class InspectionGUI(QMainWindow):
         mode_row.addWidget(QLabel("Mode:"))
         self.capture_radio = QRadioButton("Capture")
         self.realtime_radio = QRadioButton("Realtime")
+        self.anomaly_radio = QRadioButton("Anomaly")
         self.capture_radio.setChecked(True)
         self.capture_radio.toggled.connect(self.on_mode_changed)
+        self.realtime_radio.toggled.connect(self.on_mode_changed)
+        self.anomaly_radio.toggled.connect(self.on_mode_changed)
         mode_row.addWidget(self.capture_radio)
         mode_row.addWidget(self.realtime_radio)
-        mode_row.addStretch()
+        mode_row.addWidget(self.anomaly_radio)
         insp_layout.addLayout(mode_row)
 
-        # Detect FPS slider (Realtime mode)
-        detect_fps_row = QHBoxLayout()
+        # Detect FPS slider (Realtime mode) — wrapped in widget for show/hide
+        self.detect_fps_widget = QWidget()
+        detect_fps_row = QHBoxLayout(self.detect_fps_widget)
+        detect_fps_row.setContentsMargins(0, 0, 0, 0)
         detect_fps_row.addWidget(QLabel("Detect FPS:"))
         self.detect_fps_slider = QSlider(Qt.Orientation.Horizontal)
         self.detect_fps_slider.setRange(1, 30)
@@ -367,7 +377,28 @@ class InspectionGUI(QMainWindow):
         self.detect_fps_label = QLabel("30")
         self.detect_fps_label.setMinimumWidth(25)
         detect_fps_row.addWidget(self.detect_fps_label)
-        insp_layout.addLayout(detect_fps_row)
+        insp_layout.addWidget(self.detect_fps_widget)
+
+        # Anomaly threshold slider (Anomaly mode) — wrapped in widget
+        self.anomaly_threshold_widget = QWidget()
+        anomaly_thr_row = QHBoxLayout(self.anomaly_threshold_widget)
+        anomaly_thr_row.setContentsMargins(0, 0, 0, 0)
+        anomaly_thr_row.addWidget(QLabel("Threshold:"))
+        self.anomaly_threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.anomaly_threshold_slider.setRange(5, 100)
+        self.anomaly_threshold_slider.setValue(25)
+        self.anomaly_threshold_slider.valueChanged.connect(self.on_anomaly_threshold_changed)
+        anomaly_thr_row.addWidget(self.anomaly_threshold_slider)
+        self.anomaly_threshold_label = QLabel("2.5")
+        self.anomaly_threshold_label.setMinimumWidth(30)
+        anomaly_thr_row.addWidget(self.anomaly_threshold_label)
+        insp_layout.addWidget(self.anomaly_threshold_widget)
+
+        # Anomaly status
+        self.anomaly_status_label = QLabel("Anomaly: Not trained")
+        self.anomaly_status_label.setStyleSheet("color: #6c757d; font-size: 11px;")
+        self.anomaly_status_label.setWordWrap(True)
+        insp_layout.addWidget(self.anomaly_status_label)
 
         # Product
         product_row = QHBoxLayout()
@@ -483,6 +514,11 @@ class InspectionGUI(QMainWindow):
         self.cam2_zoom = 0.25
         self._realtime_running = False
 
+        # Initial widget visibility (Capture mode is default)
+        self.detect_fps_widget.setVisible(False)
+        self.anomaly_threshold_widget.setVisible(False)
+        self.anomaly_status_label.setVisible(False)
+
     def create_camera_viewer(self, title, camera_id):
         group = QGroupBox(title)
         layout = QVBoxLayout()
@@ -571,6 +607,255 @@ class InspectionGUI(QMainWindow):
                 if self.product_combo.itemData(i) == current_data:
                     self.product_combo.setCurrentIndex(i)
                     break
+
+    # ═══════════════════════════════════════════
+    #  ANOMALY TRAINING TAB
+    # ═══════════════════════════════════════════
+
+    def _create_anomaly_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        title = QLabel("Anomaly Detection — PatchCore Training")
+        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "เทรนด้วยภาพ 'ปกติ' (สมบูรณ์) 10-30 ภาพ\n"
+            "ระบบจะเรียนรู้ว่า 'ปกติ' หน้าตาเป็นอย่างไร\n"
+            "เมื่อตรวจสอบ จะแสดง heatmap บริเวณที่ผิดปกติ (Missing / Defect)")
+        desc.setStyleSheet("color: #6c757d; font-size: 13px;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        content = QHBoxLayout()
+
+        # ─── Left: Training Controls ───
+        left_group = QGroupBox("Training")
+        left_layout = QVBoxLayout()
+
+        # YOLO Crop option
+        self.anomaly_yolo_crop_cb = QCheckBox("Use YOLO Crop (ทนตำแหน่งขยับ)")
+        self.anomaly_yolo_crop_cb.setChecked(True)
+        self.anomaly_yolo_crop_cb.setToolTip(
+            "YOLO detect ก่อน → crop ชิ้นงาน → PatchCore ตรวจ anomaly บน crop\n"
+            "ช่วยให้ไม่ไวต่อตำแหน่งที่เปลี่ยน")
+        self.anomaly_yolo_crop_cb.stateChanged.connect(self.on_anomaly_yolo_crop_changed)
+        left_layout.addWidget(self.anomaly_yolo_crop_cb)
+
+        # Step 1: Capture normal images
+        step1 = QLabel("Step 1: เก็บภาพ 'ปกติ'")
+        step1.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        left_layout.addWidget(step1)
+
+        cap_row = QHBoxLayout()
+        self.anomaly_capture_btn = QPushButton("Capture from Camera")
+        self.anomaly_capture_btn.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; padding: 8px; }"
+            "QPushButton:hover { background-color: #218838; }")
+        self.anomaly_capture_btn.clicked.connect(self.on_anomaly_capture_normal)
+        cap_row.addWidget(self.anomaly_capture_btn)
+
+        self.anomaly_load_folder_btn = QPushButton("Load from Folder")
+        self.anomaly_load_folder_btn.clicked.connect(self.on_anomaly_load_folder)
+        cap_row.addWidget(self.anomaly_load_folder_btn)
+        left_layout.addLayout(cap_row)
+
+        self.anomaly_train_count_label = QLabel("Normal images: 0")
+        self.anomaly_train_count_label.setStyleSheet("font-weight: bold; color: #007bff;")
+        left_layout.addWidget(self.anomaly_train_count_label)
+
+        self.anomaly_clear_btn = QPushButton("Clear Training Images")
+        self.anomaly_clear_btn.clicked.connect(self.on_anomaly_clear)
+        left_layout.addWidget(self.anomaly_clear_btn)
+
+        # Step 2: Train
+        step2 = QLabel("Step 2: Train Model")
+        step2.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        left_layout.addWidget(step2)
+
+        self.anomaly_train_btn = QPushButton("Train PatchCore")
+        self.anomaly_train_btn.setStyleSheet(
+            "QPushButton { background-color: #007bff; color: white; padding: 10px; "
+            "font-weight: bold; font-size: 14px; }"
+            "QPushButton:hover { background-color: #0056b3; }")
+        self.anomaly_train_btn.clicked.connect(self.on_anomaly_train)
+        left_layout.addWidget(self.anomaly_train_btn)
+
+        self.anomaly_train_status = QLabel("Not trained")
+        self.anomaly_train_status.setWordWrap(True)
+        self.anomaly_train_status.setStyleSheet("color: #6c757d;")
+        left_layout.addWidget(self.anomaly_train_status)
+
+        # Step 3: Save/Load
+        step3 = QLabel("Step 3: Save / Load Model")
+        step3.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        left_layout.addWidget(step3)
+
+        save_row = QHBoxLayout()
+        self.anomaly_save_btn = QPushButton("Save Model")
+        self.anomaly_save_btn.clicked.connect(self.on_anomaly_save)
+        save_row.addWidget(self.anomaly_save_btn)
+
+        self.anomaly_load_btn = QPushButton("Load Model")
+        self.anomaly_load_btn.clicked.connect(self.on_anomaly_load)
+        save_row.addWidget(self.anomaly_load_btn)
+        left_layout.addLayout(save_row)
+
+        left_layout.addStretch()
+        left_group.setLayout(left_layout)
+        content.addWidget(left_group)
+
+        # ─── Right: Info ───
+        right_group = QGroupBox("How it works")
+        right_layout = QVBoxLayout()
+
+        info = QLabel(
+            "PatchCore Algorithm:\n\n"
+            "1. Extract deep features (ResNet18) จากภาพปกติ\n"
+            "2. สร้าง Memory Bank เก็บ patch features\n"
+            "3. ภาพใหม่ → เทียบ features กับ Memory Bank\n"
+            "4. Patch ที่ห่างจาก normal = Anomaly\n\n"
+            "YOLO Hybrid Mode:\n"
+            "• YOLO detect ชิ้นงานก่อน → Crop\n"
+            "• PatchCore ตรวจ anomaly บน crop\n"
+            "• ไม่ไวต่อตำแหน่งที่เปลี่ยน\n\n"
+            "Tips:\n"
+            "• ใช้ภาพปกติ 10-30 ภาพ (ยิ่งมากยิ่งดี)\n"
+            "• ถ่ายจากมุมเดียวกัน แสงคล้ายกัน\n"
+            "• ปรับ Threshold ตาม sensitivity ที่ต้องการ\n"
+            "  (ค่าต่ำ = ไวมาก, ค่าสูง = ทนทาน)")
+        info.setStyleSheet("color: #495057; font-size: 12px;")
+        info.setWordWrap(True)
+        right_layout.addWidget(info)
+        right_layout.addStretch()
+        right_group.setLayout(right_layout)
+        content.addWidget(right_group)
+
+        layout.addLayout(content)
+        return widget
+
+    # ═══════════════════════════════════════════
+    #  ANOMALY HANDLERS
+    # ═══════════════════════════════════════════
+
+    def _ensure_anomaly_initialized(self):
+        """Initialize anomaly engine if not done"""
+        anomaly = self.inspection_controller.anomaly
+        if not anomaly.is_initialized():
+            device = self.detection_engine.device if self.detection_engine.device else "auto"
+            anomaly.initialize(device)
+            anomaly.training_progress.connect(self._on_anomaly_progress)
+        return anomaly
+
+    def _on_anomaly_progress(self, msg):
+        self.anomaly_train_status.setText(msg)
+        self.anomaly_status_label.setText(f"Anomaly: {msg}")
+        self.status_bar.showMessage(f"Anomaly: {msg}")
+
+    def on_anomaly_yolo_crop_changed(self, state):
+        anomaly = self._ensure_anomaly_initialized()
+        anomaly.set_yolo_crop(bool(state))
+
+    def on_anomaly_capture_normal(self):
+        """Capture ภาพปกติจากกล้อง"""
+        anomaly = self._ensure_anomaly_initialized()
+
+        # Capture from camera 0
+        frame = self.camera_manager.capture_frame(0)
+        if frame is None:
+            QMessageBox.warning(self, "Error", "Cannot capture from camera.\nPlease connect camera first.")
+            return
+
+        # If YOLO crop enabled and model loaded, crop first
+        if anomaly.use_yolo_crop and self.detection_engine.is_model_loaded():
+            detection = self.detection_engine.detect(frame)
+            for det in detection["detections"]:
+                bbox = det["bbox"]
+                pad = anomaly.crop_padding
+                h, w = frame.shape[:2]
+                x1 = max(0, bbox["x"] - pad)
+                y1 = max(0, bbox["y"] - pad)
+                x2 = min(w, bbox["x"] + bbox["w"] + pad)
+                y2 = min(h, bbox["y"] + bbox["h"] + pad)
+                crop = frame[y1:y2, x1:x2]
+                if crop.size > 0:
+                    count = anomaly.add_normal_image(crop)
+                    self.anomaly_train_count_label.setText(f"Normal images: {count}")
+            if not detection["detections"]:
+                QMessageBox.warning(self, "Warning",
+                    "YOLO did not detect any objects.\n"
+                    "Try without YOLO crop or load YOLO model first.")
+        else:
+            count = anomaly.add_normal_image(frame)
+            self.anomaly_train_count_label.setText(f"Normal images: {count}")
+
+        # Show preview
+        self.frame_display.emit(0, frame)
+        self.status_bar.showMessage(
+            f"Captured normal image (total: {anomaly.get_training_count()})")
+
+    def on_anomaly_load_folder(self):
+        """Load ภาพปกติจาก folder"""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder with Normal Images")
+        if not folder:
+            return
+
+        anomaly = self._ensure_anomaly_initialized()
+        count = anomaly.add_normal_images_from_folder(folder)
+        self.anomaly_train_count_label.setText(
+            f"Normal images: {anomaly.get_training_count()}")
+        self.status_bar.showMessage(f"Loaded {count} images from folder")
+
+    def on_anomaly_clear(self):
+        anomaly = self._ensure_anomaly_initialized()
+        anomaly.reset_training()
+        self.anomaly_train_count_label.setText("Normal images: 0")
+        self.anomaly_train_status.setText("Not trained")
+        self.anomaly_status_label.setText("Anomaly: Not trained")
+
+    def on_anomaly_train(self):
+        """Train PatchCore model"""
+        anomaly = self._ensure_anomaly_initialized()
+        if anomaly.get_training_count() == 0:
+            QMessageBox.warning(self, "Warning",
+                "No normal images added.\nPlease capture or load normal images first.")
+            return
+
+        self.anomaly_train_status.setText("Training...")
+        self.anomaly_train_btn.setEnabled(False)
+        QApplication.processEvents()
+
+        success = anomaly.train()
+        self.anomaly_train_btn.setEnabled(True)
+
+        if success:
+            self.anomaly_status_label.setText("Anomaly: Trained OK")
+
+    def on_anomaly_save(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Anomaly Model", "anomaly_model.pkl",
+            "Pickle Files (*.pkl);;All Files (*)")
+        if path:
+            anomaly = self._ensure_anomaly_initialized()
+            anomaly.save_model(path)
+
+    def on_anomaly_load(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Anomaly Model", "",
+            "Pickle Files (*.pkl);;All Files (*)")
+        if path:
+            anomaly = self._ensure_anomaly_initialized()
+            if anomaly.load_model(path):
+                self.anomaly_train_count_label.setText(
+                    f"Normal images: {anomaly.get_training_count()}")
+                self.anomaly_status_label.setText("Anomaly: Model loaded")
+
+    def on_anomaly_threshold_changed(self, value):
+        thr = value / 10.0
+        self.anomaly_threshold_label.setText(f"{thr:.1f}")
+        self.inspection_controller.anomaly.set_threshold(thr)
 
     # ═══════════════════════════════════════════
     #  CAMERA HANDLERS
@@ -788,17 +1073,28 @@ class InspectionGUI(QMainWindow):
 
     def on_mode_changed(self):
         is_capture = self.capture_radio.isChecked()
-        self.trigger_btn.setVisible(is_capture)
-        self.load_file_btn.setVisible(is_capture)
-        self.start_stop_btn.setVisible(not is_capture)
-        self.fps_label.setVisible(not is_capture)
-        self.detect_fps_slider.setVisible(not is_capture)
-        self.detect_fps_label.setVisible(not is_capture)
+        is_realtime = self.realtime_radio.isChecked()
+        is_anomaly = self.anomaly_radio.isChecked()
+
+        # Capture/Anomaly → show TRIGGER + Load File
+        self.trigger_btn.setVisible(is_capture or is_anomaly)
+        self.load_file_btn.setVisible(is_capture or is_anomaly)
+
+        # Realtime → show START/STOP + FPS
+        self.start_stop_btn.setVisible(is_realtime)
+        self.fps_label.setVisible(is_realtime)
+        self.detect_fps_widget.setVisible(is_realtime)
+
+        # Anomaly → show threshold + status
+        self.anomaly_threshold_widget.setVisible(is_anomaly)
+        self.anomaly_status_label.setVisible(is_anomaly)
 
         if is_capture:
             self.inspection_controller.set_mode("capture")
-        else:
+        elif is_realtime:
             self.inspection_controller.set_mode("realtime")
+        elif is_anomaly:
+            self.inspection_controller.set_mode("anomaly")
 
         self.save_ui_state()
 
@@ -820,15 +1116,29 @@ class InspectionGUI(QMainWindow):
     # ═══════════════════════════════════════════
 
     def on_trigger(self):
-        if not self.detection_engine.is_model_loaded():
-            QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
-            return
+        is_anomaly = self.anomaly_radio.isChecked()
+
+        if is_anomaly:
+            # Anomaly mode
+            if not self.inspection_controller.anomaly.is_trained:
+                QMessageBox.warning(self, "Warning",
+                    "Anomaly model not trained.\n"
+                    "Go to 'Anomaly Training' tab to train first.")
+                return
+        else:
+            # Capture mode (YOLO)
+            if not self.detection_engine.is_model_loaded():
+                QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
+                return
 
         self.trigger_btn.setText("Inspecting...")
         self.trigger_btn.setEnabled(False)
         QApplication.processEvents()
 
-        self.inspection_controller.trigger_capture(0)
+        if is_anomaly:
+            self.inspection_controller.trigger_anomaly(0)
+        else:
+            self.inspection_controller.trigger_capture(0)
 
         self.trigger_btn.setText("TRIGGER")
         self.trigger_btn.setEnabled(True)
@@ -840,15 +1150,25 @@ class InspectionGUI(QMainWindow):
         if not file_path:
             return
 
-        if not self.detection_engine.is_model_loaded():
-            QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
-            return
+        is_anomaly = self.anomaly_radio.isChecked()
+
+        if is_anomaly:
+            if not self.inspection_controller.anomaly.is_trained:
+                QMessageBox.warning(self, "Warning", "Anomaly model not trained.")
+                return
+        else:
+            if not self.detection_engine.is_model_loaded():
+                QMessageBox.warning(self, "Warning", "Please load a YOLO model first")
+                return
 
         self.trigger_btn.setText("Inspecting...")
         self.trigger_btn.setEnabled(False)
         QApplication.processEvents()
 
-        self.inspection_controller.trigger_capture_from_file(file_path)
+        if is_anomaly:
+            self.inspection_controller.trigger_anomaly_from_file(file_path)
+        else:
+            self.inspection_controller.trigger_capture_from_file(file_path)
 
         self.trigger_btn.setText("TRIGGER")
         self.trigger_btn.setEnabled(True)

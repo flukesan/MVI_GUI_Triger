@@ -21,6 +21,7 @@ from camera_manager import CameraManager
 from detection_engine import DetectionEngine
 from component_definition import ComponentDefinitionManager
 from history_manager import HistoryManager
+from anomaly_engine import AnomalyEngine
 
 
 class DetectionWorker(QThread):
@@ -90,8 +91,9 @@ class InspectionController(QObject):
         self.detector = detection_engine
         self.components = component_manager
         self.history = history_manager
+        self.anomaly = AnomalyEngine()
 
-        self.current_mode: str = "capture"      # "capture" or "realtime"
+        self.current_mode: str = "capture"      # "capture", "realtime", "anomaly"
         self.current_product_id: Optional[int] = None
         self.current_product_name: str = ""
         self.expected_parts: List[Dict] = []    # loaded from component DB
@@ -477,6 +479,120 @@ class InspectionController(QObject):
         else:
             # ไม่มี ROI — เอาตัวที่ confidence สูงสุด
             return max(candidates, key=lambda d: d["confidence"])
+
+    # ─── Anomaly Mode ───
+
+    def trigger_anomaly(self, camera_id: int = 0) -> Optional[dict]:
+        """Anomaly Mode: ถ่ายภาพ → YOLO crop (optional) → PatchCore → แสดง heatmap"""
+        if not self.anomaly.is_trained:
+            self.error_occurred.emit("Anomaly model not trained")
+            return None
+
+        self.status_changed.emit("inspecting")
+
+        # 1. Capture frame
+        frame = self.camera.capture_frame(camera_id)
+        if frame is None:
+            self.error_occurred.emit("Failed to capture frame")
+            self.status_changed.emit("ready")
+            return None
+
+        # 2. YOLO crop + Anomaly detect (hybrid) or whole image
+        if self.anomaly.use_yolo_crop and self.detector.is_model_loaded():
+            # YOLO detect first → crop → anomaly on each crop
+            detection = self.detector.detect(frame)
+            anomaly_result = self.anomaly.predict_on_crops(
+                frame, detection["detections"])
+            annotated = self.anomaly.annotate_crops_result(frame, anomaly_result)
+        else:
+            # Anomaly on whole image (no YOLO)
+            anomaly_result = self.anomaly.predict(frame)
+            annotated = self.anomaly.annotate_result(frame, anomaly_result)
+
+        # 3. Build result
+        is_anomaly = anomaly_result.get("is_anomaly", False)
+        score = anomaly_result.get("anomaly_score", 0)
+
+        result = {
+            "status": "FAIL" if is_anomaly else "PASS",
+            "reason": f"Anomaly score: {score:.2f} (threshold: {self.anomaly.threshold:.1f})",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "camera_id": camera_id,
+            "product_name": self.current_product_name or "Anomaly Check",
+            "mode": "anomaly",
+            "found_count": 0,
+            "total_expected": 0,
+            "missing_parts": [],
+            "inference_time_ms": anomaly_result.get("inference_time_ms", 0),
+            "detection_count": 0,
+            "all_detections": [],
+            "anomaly_score": score,
+            "annotated_image": annotated,
+            "original_image": frame,
+        }
+
+        # 4. Display
+        self.frame_display.emit(camera_id, annotated)
+
+        # 5. Save to history
+        self._save_to_history(result, annotated)
+
+        # 6. Emit result
+        self.inspection_result.emit(result)
+        self.status_changed.emit("ready")
+
+        return result
+
+    def trigger_anomaly_from_file(self, file_path: str) -> Optional[dict]:
+        """Anomaly Mode: โหลดภาพจากไฟล์ → PatchCore"""
+        if not self.anomaly.is_trained:
+            self.error_occurred.emit("Anomaly model not trained")
+            return None
+
+        self.status_changed.emit("inspecting")
+
+        frame = self.camera.load_image_file(file_path)
+        if frame is None:
+            self.error_occurred.emit(f"Failed to load image: {file_path}")
+            self.status_changed.emit("ready")
+            return None
+
+        if self.anomaly.use_yolo_crop and self.detector.is_model_loaded():
+            detection = self.detector.detect(frame)
+            anomaly_result = self.anomaly.predict_on_crops(
+                frame, detection["detections"])
+            annotated = self.anomaly.annotate_crops_result(frame, anomaly_result)
+        else:
+            anomaly_result = self.anomaly.predict(frame)
+            annotated = self.anomaly.annotate_result(frame, anomaly_result)
+
+        is_anomaly = anomaly_result.get("is_anomaly", False)
+        score = anomaly_result.get("anomaly_score", 0)
+
+        result = {
+            "status": "FAIL" if is_anomaly else "PASS",
+            "reason": f"Anomaly score: {score:.2f} (threshold: {self.anomaly.threshold:.1f})",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "camera_id": -1,
+            "product_name": self.current_product_name or "Anomaly Check",
+            "mode": "anomaly",
+            "found_count": 0,
+            "total_expected": 0,
+            "missing_parts": [],
+            "inference_time_ms": anomaly_result.get("inference_time_ms", 0),
+            "detection_count": 0,
+            "all_detections": [],
+            "anomaly_score": score,
+            "annotated_image": annotated,
+            "original_image": frame,
+        }
+
+        self.frame_display.emit(0, annotated)
+        self._save_to_history(result, annotated)
+        self.inspection_result.emit(result)
+        self.status_changed.emit("ready")
+
+        return result
 
     # ─── History ───
 
