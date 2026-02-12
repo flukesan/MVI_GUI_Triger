@@ -1,16 +1,23 @@
 """
-Anomaly Detection Engine — PatchCore Algorithm
+Anomaly Detection Engine — PatchCore Algorithm (Production Grade)
 ตรวจจับความผิดปกติโดยไม่ต้องกำหนด Component Definition
 
 หลักการ:
-1. เก็บภาพ "ปกติ" (10-30 ภาพ) → Extract patch features (ResNet)
-2. สร้าง Memory Bank จาก patch features ทั้งหมด
-3. ภาพใหม่ → Extract features → เทียบกับ Memory Bank
+1. เก็บภาพ "ปกติ" (10-30 ภาพ) → Extract patch features (WideResNet50)
+2. สร้าง Memory Bank จาก patch features (Greedy K-Center Coreset)
+3. ภาพใหม่ → Extract features → เทียบกับ Memory Bank (K-nearest neighbor)
 4. ถ้า distance สูง = Anomaly → แสดง heatmap บริเวณที่ผิดปกติ
 
 รองรับ:
 - Standalone mode (ตรวจทั้งภาพ)
 - YOLO Hybrid mode (YOLO crop ก่อน แล้วตรวจ anomaly บน crop — ทนตำแหน่งขยับ)
+
+Level 1 Upgrades:
+- WideResNet50 backbone (1536 features vs 384 for ResNet18)
+- Greedy K-Center coreset (ครอบคลุม feature space ดีกว่า random)
+- Full-inference auto-threshold calibration
+- Configurable image size (224/256/320/448)
+- L2 feature normalization + K-nearest neighbor averaging
 """
 
 import time
@@ -36,16 +43,44 @@ except ImportError:
     from PySide6.QtCore import QObject, Signal
 
 
+# ═══════════════════════════════════════════════════
+#  Backbone configurations
+# ═══════════════════════════════════════════════════
+
+BACKBONE_CONFIG = {
+    "wide_resnet50": {
+        "model_fn": lambda: models.wide_resnet50_2(weights=None),
+        "model_fn_pretrained": lambda: models.wide_resnet50_2(
+            weights=models.Wide_ResNet50_2_Weights.DEFAULT),
+        "weight_filename": "wide_resnet50_2-95faca4d.pth",
+        "layers": ["layer2", "layer3"],
+        # layer2: 512 channels, layer3: 1024 channels → total 1536
+        "feature_dim": 1536,
+    },
+    "resnet18": {
+        "model_fn": lambda: models.resnet18(weights=None),
+        "model_fn_pretrained": lambda: models.resnet18(
+            weights=models.ResNet18_Weights.DEFAULT),
+        "weight_filename": "resnet18-f37072fd.pth",
+        "layers": ["layer2", "layer3"],
+        # layer2: 128 channels, layer3: 256 channels → total 384
+        "feature_dim": 384,
+    },
+}
+
+WEIGHT_SEARCH_PATHS = [
+    Path.home() / ".cache" / "torch" / "hub" / "checkpoints",
+    Path(__file__).parent / "models",
+    Path.cwd() / "models",
+]
+
+
 class AnomalyEngine(QObject):
-    """PatchCore-based Anomaly Detection Engine"""
+    """PatchCore-based Anomaly Detection Engine (Production Grade)"""
 
     # Signals
     training_progress = Signal(str)  # status message
     model_ready = Signal(str)        # model info
-
-    # Feature extraction settings
-    IMAGE_SIZE = (224, 224)
-    BACKBONE = "resnet18"
 
     def __init__(self):
         super().__init__()
@@ -54,6 +89,11 @@ class AnomalyEngine(QObject):
         self.device: str = "cpu"
         self.threshold: float = 2.5
         self.is_trained: bool = False
+
+        # Configuration (configurable before initialize)
+        self.backbone_name: str = "wide_resnet50"
+        self.image_size: Tuple[int, int] = (256, 256)
+        self.num_neighbors: int = 3  # K for KNN scoring
 
         # Training state
         self._features_list: List[torch.Tensor] = []
@@ -71,83 +111,89 @@ class AnomalyEngine(QObject):
     #  INITIALIZATION
     # ═══════════════════════════════════════════
 
-    # Common locations to search for ResNet18 weights
-    RESNET18_WEIGHT_FILENAME = "resnet18-f37072fd.pth"
-    RESNET18_WEIGHT_SEARCH_PATHS = [
-        # Torch hub cache (default download location)
-        Path.home() / ".cache" / "torch" / "hub" / "checkpoints",
-        # Project-local models directory
-        Path(__file__).parent / "models",
-        # Working directory
-        Path.cwd() / "models",
-    ]
-
-    def _load_resnet18_backbone(self):
+    def _load_backbone(self, config: dict):
         """
-        โหลด ResNet18 backbone — รองรับ offline (ไม่มี internet)
+        โหลด backbone — รองรับ offline (ไม่มี internet)
 
-        ลำดับการโหลด:
-        1. ลอง weights=DEFAULT (ใช้ cache ถ้ามี, หรือ download ถ้ามีเน็ต)
-        2. ถ้าล้มเหลว → หาไฟล์ .pth ใน local paths
-        3. ถ้าไม่เจอ → ใช้ random weights (ผลลัพธ์แย่ลง แต่ยังทำงานได้)
+        ลำดับ: pretrained (cache/download) → local .pth → random weights
         """
+        name = self.backbone_name
+        weight_file = config["weight_filename"]
+
         # --- Attempt 1: standard load (uses cache or downloads) ---
         try:
-            backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-            print("ResNet18: loaded with pre-trained weights (cache/download)")
+            backbone = config["model_fn_pretrained"]()
+            print(f"{name}: loaded with pre-trained weights (cache/download)")
             return backbone
         except Exception as e:
-            print(f"ResNet18: standard load failed — {e}")
+            print(f"{name}: standard load failed — {e}")
 
         # --- Attempt 2: load from local .pth file ---
-        for search_dir in self.RESNET18_WEIGHT_SEARCH_PATHS:
-            weight_path = search_dir / self.RESNET18_WEIGHT_FILENAME
+        for search_dir in WEIGHT_SEARCH_PATHS:
+            weight_path = search_dir / weight_file
             if weight_path.is_file():
                 try:
-                    backbone = models.resnet18(weights=None)
+                    backbone = config["model_fn"]()
                     state_dict = torch.load(
                         str(weight_path), map_location="cpu", weights_only=True
                     )
                     backbone.load_state_dict(state_dict)
-                    print(f"ResNet18: loaded weights from {weight_path}")
+                    print(f"{name}: loaded weights from {weight_path}")
                     return backbone
                 except Exception as e2:
-                    print(f"ResNet18: failed to load from {weight_path} — {e2}")
+                    print(f"{name}: failed to load from {weight_path} — {e2}")
 
-        # --- Attempt 3: random weights (functional but less accurate) ---
+        # --- Attempt 3: random weights ---
         self.training_progress.emit(
-            "Warning: ใช้ random weights (ไม่มี pre-trained) — "
-            "ผลลัพธ์อาจแย่ลง ควรคัดลอก resnet18-f37072fd.pth มาวางที่ models/"
+            f"Warning: {name} ใช้ random weights — "
+            f"ควรคัดลอก {weight_file} มาวางที่ models/"
         )
-        print(
-            "ResNet18: WARNING — using random weights (no pre-trained).\n"
-            "  To fix: copy resnet18-f37072fd.pth to one of:\n"
-            f"  {[str(p / self.RESNET18_WEIGHT_FILENAME) for p in self.RESNET18_WEIGHT_SEARCH_PATHS]}"
-        )
-        backbone = models.resnet18(weights=None)
+        print(f"{name}: WARNING — using random weights (no pre-trained).")
+        backbone = config["model_fn"]()
         return backbone
 
-    def initialize(self, device: str = "auto") -> bool:
-        """โหลด pre-trained ResNet สำหรับ feature extraction"""
+    def initialize(self, device: str = "auto",
+                   backbone: str = "", image_size: int = 0) -> bool:
+        """
+        โหลด pre-trained backbone สำหรับ feature extraction
+
+        Args:
+            device: "auto", "cuda", "cpu", or GPU index "0"
+            backbone: "wide_resnet50" or "resnet18" (empty = use current setting)
+            image_size: 224, 256, 320, 448 (0 = use current setting)
+        """
         if not TORCH_AVAILABLE:
             self.training_progress.emit("Error: PyTorch not installed")
             return False
 
         try:
+            # Device
             if device == "auto":
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
             elif device.isdigit():
-                # YOLO/ultralytics uses '0' for GPU index → convert to 'cuda:0'
                 self.device = f"cuda:{device}" if torch.cuda.is_available() else "cpu"
             else:
                 self.device = device
 
-            # Load ResNet18 (supports offline / no-internet machines)
-            backbone = self._load_resnet18_backbone()
-            backbone.eval()
-            backbone.to(self.device)
+            # Backbone
+            if backbone and backbone in BACKBONE_CONFIG:
+                self.backbone_name = backbone
+            config = BACKBONE_CONFIG[self.backbone_name]
 
-            # Hook intermediate layers for multi-scale features
+            # Image size
+            if image_size > 0:
+                self.image_size = (image_size, image_size)
+
+            self.training_progress.emit(
+                f"Loading {self.backbone_name} ({config['feature_dim']}D features, "
+                f"image {self.image_size[0]}px)...")
+
+            # Load backbone
+            net = self._load_backbone(config)
+            net.eval()
+            net.to(self.device)
+
+            # Hook intermediate layers
             self._hook_features = {}
 
             def make_hook(name):
@@ -155,21 +201,21 @@ class AnomalyEngine(QObject):
                     self._hook_features[name] = output
                 return hook
 
-            # Clear old hooks
             for h in self._hook_handles:
                 h.remove()
 
-            self._hook_handles = [
-                backbone.layer2.register_forward_hook(make_hook("layer2")),
-                backbone.layer3.register_forward_hook(make_hook("layer3")),
-            ]
+            self._hook_handles = []
+            for layer_name in config["layers"]:
+                layer = getattr(net, layer_name)
+                handle = layer.register_forward_hook(make_hook(layer_name))
+                self._hook_handles.append(handle)
 
-            self.feature_extractor = backbone
+            self.feature_extractor = net
 
             # Image preprocessing (ImageNet normalization)
             self._transform = transforms.Compose([
                 transforms.ToPILImage(),
-                transforms.Resize(self.IMAGE_SIZE),
+                transforms.Resize(self.image_size),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     mean=[0.485, 0.456, 0.406],
@@ -177,7 +223,8 @@ class AnomalyEngine(QObject):
                 )
             ])
 
-            msg = f"Anomaly Engine ready ({self.BACKBONE} on {self.device})"
+            msg = (f"Anomaly Engine ready ({self.backbone_name} "
+                   f"{config['feature_dim']}D, {self.image_size[0]}px, {self.device})")
             self.training_progress.emit(msg)
             print(msg)
             return True
@@ -196,10 +243,10 @@ class AnomalyEngine(QObject):
 
     def _extract_features(self, image: np.ndarray) -> Tuple[torch.Tensor, Tuple[int, int]]:
         """
-        Extract multi-scale patch features จากภาพ
+        Extract multi-scale patch features จากภาพ + L2 normalize
 
         Returns:
-            patches: (H*W, D) tensor — D=384 (128+256 from layer2+layer3)
+            patches: (H*W, D) tensor — L2-normalized
             spatial_size: (H, W) — spatial dimensions ของ patch grid
         """
         # BGR → RGB
@@ -213,21 +260,32 @@ class AnomalyEngine(QObject):
         with torch.no_grad():
             _ = self.feature_extractor(tensor)
 
-        # layer2: (1, 128, 28, 28), layer3: (1, 256, 14, 14)
-        feat2 = self._hook_features["layer2"]
-        feat3 = self._hook_features["layer3"]
+        config = BACKBONE_CONFIG[self.backbone_name]
+        layer_names = config["layers"]
 
-        # Upsample layer3 to match layer2 spatial size
-        feat3_up = F.interpolate(
-            feat3, size=feat2.shape[-2:],
-            mode="bilinear", align_corners=False
-        )
+        # Get features from first layer (reference spatial size)
+        feat_first = self._hook_features[layer_names[0]]
+        target_size = feat_first.shape[-2:]
 
-        # Concatenate: (1, 384, 28, 28)
-        features = torch.cat([feat2, feat3_up], dim=1)
+        # Collect and upsample all layers to same spatial size
+        feats = []
+        for layer_name in layer_names:
+            feat = self._hook_features[layer_name]
+            if feat.shape[-2:] != target_size:
+                feat = F.interpolate(
+                    feat, size=target_size,
+                    mode="bilinear", align_corners=False
+                )
+            feats.append(feat)
+
+        # Concatenate multi-scale features
+        features = torch.cat(feats, dim=1)
 
         B, D, H, W = features.shape
-        patches = features.permute(0, 2, 3, 1).reshape(-1, D)  # (784, 384)
+        patches = features.permute(0, 2, 3, 1).reshape(-1, D)
+
+        # L2 normalize — makes distance computation more stable
+        patches = F.normalize(patches, p=2, dim=1)
 
         return patches, (H, W)
 
@@ -236,15 +294,7 @@ class AnomalyEngine(QObject):
     # ═══════════════════════════════════════════
 
     def add_normal_image(self, image: np.ndarray) -> int:
-        """
-        เพิ่มภาพ "ปกติ" สำหรับเทรน
-
-        Args:
-            image: BGR image (numpy array)
-
-        Returns:
-            จำนวนภาพที่เก็บแล้วทั้งหมด
-        """
+        """เพิ่มภาพ "ปกติ" สำหรับเทรน"""
         if not self.is_initialized():
             raise RuntimeError("Engine not initialized")
 
@@ -288,83 +338,163 @@ class AnomalyEngine(QObject):
         self.training_progress.emit("Training: building memory bank...")
 
         # Concatenate all patch features
-        all_patches = torch.cat(self._features_list, dim=0)  # (N*784, 384)
+        all_patches = torch.cat(self._features_list, dim=0)
         total = all_patches.shape[0]
-        print(f"Total patches from {self._training_images_count} images: {total}")
+        print(f"Total patches from {self._training_images_count} images: {total} "
+              f"(dim={all_patches.shape[1]})")
 
         # Auto memory size: keep 25% of patches (min 5000, max GPU-safe)
         if max_memory_size <= 0:
             max_memory_size = max(5000, total // 4)
-            # Limit to avoid GPU OOM (~50k patches ≈ 75MB GPU memory)
             max_memory_size = min(max_memory_size, 50000)
 
-        # Coreset subsampling
+        # ═══ Greedy K-Center Coreset ═══
         target = min(max_memory_size, total)
         if total > target:
             self.training_progress.emit(
-                f"Training: subsampling {total} → {target} patches..."
-            )
-            indices = self._random_coreset(total, target)
+                f"Training: greedy coreset {total} → {target} patches...")
+            indices = self._greedy_coreset(all_patches, target)
             self.memory_bank = all_patches[indices].to(self.device)
         else:
             self.memory_bank = all_patches.to(self.device)
 
         self.is_trained = True
 
-        # ═══ Auto-calibrate threshold ═══
+        # ═══ Full-inference auto-threshold ═══
         self.training_progress.emit("Calibrating threshold on training images...")
-        self._auto_calibrate_threshold()
+        self._auto_calibrate_threshold_full(all_patches)
 
         self._features_list = []  # Free memory
 
         info = (f"Trained: {self._training_images_count} images, "
-                f"memory bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}, "
-                f"threshold: {self.threshold:.1f}")
+                f"bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}, "
+                f"backbone={self.backbone_name}, img={self.image_size[0]}px, "
+                f"K={self.num_neighbors}, threshold={self.threshold:.1f}")
         self.training_progress.emit(f"OK: {info}")
         self.model_ready.emit(info)
         print(info)
         return True
 
-    def _auto_calibrate_threshold(self):
+    def _greedy_coreset(self, all_patches: torch.Tensor, target: int) -> list:
         """
-        Auto-calibrate threshold จากภาพเทรน
-        วิ่ง inference บน memory bank เอง → หา max normal score → ตั้ง threshold
+        Greedy K-Center Coreset Selection
+
+        เลือก patches ที่ครอบคลุม feature space ดีที่สุด:
+        1. เริ่มจาก random patch 1 ตัว
+        2. วนเลือก patch ที่ห่างจาก selected set มากที่สุด
+        3. ทำซ้ำจนได้ target จำนวน
+
+        ใช้ GPU + chunk processing เพื่อประสิทธิภาพ
+        """
+        n = all_patches.shape[0]
+        device = self.device
+
+        # Move to GPU for fast distance computation
+        patches_gpu = all_patches.to(device)
+
+        # Start with random seed
+        selected = [np.random.randint(0, n)]
+        min_dists = torch.full((n,), float('inf'), device=device)
+
+        for i in range(1, target):
+            # Update min distances with last selected patch
+            last = patches_gpu[selected[-1]].unsqueeze(0)  # (1, D)
+
+            # Chunk to avoid OOM
+            chunk_size = 10000
+            for start in range(0, n, chunk_size):
+                end = min(start + chunk_size, n)
+                chunk = patches_gpu[start:end]
+                dists = torch.cdist(chunk, last).squeeze(1)  # (chunk,)
+                min_dists[start:end] = torch.minimum(min_dists[start:end], dists)
+
+            # Select patch with maximum min-distance
+            next_idx = int(min_dists.argmax().item())
+            selected.append(next_idx)
+
+            # Progress every 500 steps
+            if i % 500 == 0:
+                self.training_progress.emit(
+                    f"Coreset: {i}/{target} ({i*100//target}%)")
+
+        return selected
+
+    def _auto_calibrate_threshold_full(self, all_patches: torch.Tensor):
+        """
+        Full-inference auto-threshold:
+        จำลอง inference จริงบนภาพเทรนแต่ละภาพ → วัด max score → ตั้ง threshold
         """
         if self.memory_bank is None:
             return
 
-        # Sample patches from memory bank → compute self-distance
-        # ใช้ random sample เพื่อความเร็ว
-        n = self.memory_bank.shape[0]
-        sample_size = min(500, n)
-        indices = np.random.choice(n, size=sample_size, replace=False)
-        sample = self.memory_bank[indices]
+        # Compute per-image scores (simulate actual inference)
+        config = BACKBONE_CONFIG[self.backbone_name]
+        feature_dim = config["feature_dim"]
 
-        # For each sample patch, find distance to nearest OTHER patch
-        chunk_size = 128
-        max_distances = []
-        for i in range(0, sample.shape[0], chunk_size):
-            chunk = sample[i:i + chunk_size]
+        # Calculate patches per image from image_size
+        # For ResNet-like: spatial = image_size / 8 (after layer2)
+        spatial = self.image_size[0] // 8
+        patches_per_image = spatial * spatial
+
+        all_scores = []
+        n_images = all_patches.shape[0] // patches_per_image
+
+        for img_idx in range(n_images):
+            start = img_idx * patches_per_image
+            end = start + patches_per_image
+            if end > all_patches.shape[0]:
+                break
+
+            img_patches = all_patches[start:end].to(self.device)
+
+            # KNN scoring (same as predict)
+            score = self._compute_anomaly_score(img_patches)
+            all_scores.append(score)
+
+        if all_scores:
+            max_normal = max(all_scores)
+            mean_normal = sum(all_scores) / len(all_scores)
+            std_normal = (sum((s - mean_normal)**2 for s in all_scores)
+                         / len(all_scores)) ** 0.5
+
+            # Threshold = mean + 3*std (or max*1.5, whichever is larger)
+            threshold_stat = mean_normal + 3 * std_normal
+            threshold_max = max_normal * 1.5
+            self.threshold = round(max(threshold_stat, threshold_max), 1)
+
+            print(f"Auto-threshold (full inference on {len(all_scores)} images): "
+                  f"mean={mean_normal:.2f}, std={std_normal:.2f}, "
+                  f"max={max_normal:.2f} → threshold={self.threshold:.1f}")
+        else:
+            self.threshold = 5.0
+            print("Auto-threshold: no images to calibrate, using default 5.0")
+
+    def _compute_anomaly_score(self, patches: torch.Tensor) -> float:
+        """Compute anomaly score from patches (shared by predict + calibration)"""
+        chunk_size = 256
+        min_distances = []
+        for i in range(0, patches.shape[0], chunk_size):
+            chunk = patches[i:i + chunk_size]
             dists = torch.cdist(chunk, self.memory_bank)  # (chunk, N)
 
-            # Set self-distance to inf (don't match with yourself)
-            for j in range(chunk.shape[0]):
-                global_idx = indices[i + j]
-                dists[j, global_idx] = float('inf')
+            if self.num_neighbors > 1:
+                # Top-K nearest neighbor: average of K smallest distances
+                k = min(self.num_neighbors, dists.shape[1])
+                topk, _ = dists.topk(k, dim=1, largest=False)
+                mins = topk.mean(dim=1)
+            else:
+                mins, _ = dists.min(dim=1)
 
-            mins, _ = dists.min(dim=1)
-            max_distances.append(mins.max().item())
+            min_distances.append(mins)
 
-        # Threshold = max normal distance × multiplier
-        max_normal_score = max(max_distances) if max_distances else 5.0
-        self.threshold = round(max_normal_score * 2.0, 1)
+        min_distances = torch.cat(min_distances)
 
-        print(f"Auto-calibrated: max normal distance={max_normal_score:.2f}, "
-              f"threshold={self.threshold:.1f} (2x multiplier)")
+        # Score = max patch distance (most anomalous patch)
+        return float(min_distances.max().item())
 
     @staticmethod
     def _random_coreset(total: int, target: int) -> list:
-        """Random subsampling (fast, works well in practice)"""
+        """Random subsampling (legacy fallback)"""
         return np.random.choice(total, size=target, replace=False).tolist()
 
     def get_training_count(self) -> int:
@@ -408,20 +538,24 @@ class AnomalyEngine(QObject):
 
         patches, (H, W) = self._extract_features(image)
 
-        # KNN: distance to nearest neighbor in memory bank
-        # patches: (M, D), memory_bank: (N, D)
-        # Process in chunks to save GPU memory
+        # KNN scoring with K neighbors
         chunk_size = 256
         min_distances = []
         for i in range(0, patches.shape[0], chunk_size):
             chunk = patches[i:i + chunk_size]
-            dists = torch.cdist(chunk, self.memory_bank)  # (chunk, N)
-            mins, _ = dists.min(dim=1)
+            dists = torch.cdist(chunk, self.memory_bank)
+
+            if self.num_neighbors > 1:
+                k = min(self.num_neighbors, dists.shape[1])
+                topk, _ = dists.topk(k, dim=1, largest=False)
+                mins = topk.mean(dim=1)
+            else:
+                mins, _ = dists.min(dim=1)
+
             min_distances.append(mins)
 
-        min_distances = torch.cat(min_distances)  # (M,)
+        min_distances = torch.cat(min_distances)
 
-        # Anomaly score = max patch distance
         anomaly_score = float(min_distances.max().item())
 
         # Heatmap: reshape to spatial dimensions
@@ -437,7 +571,6 @@ class AnomalyEngine(QObject):
         else:
             heatmap_norm = np.zeros((img_h, img_w), dtype=np.uint8)
 
-        # Apply JET colormap
         heatmap_color = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
 
         inference_ms = (time.time() - start_time) * 1000
@@ -459,14 +592,7 @@ class AnomalyEngine(QObject):
 
     def annotate_result(self, image: np.ndarray, result: dict,
                         alpha: float = 0.4) -> np.ndarray:
-        """
-        วาด annotated image: overlay heatmap + score + status
-
-        Args:
-            image: BGR image
-            result: dict from predict()
-            alpha: heatmap opacity
-        """
+        """วาด annotated image: overlay heatmap + score + status"""
         heatmap = result.get("heatmap")
         if heatmap is not None:
             annotated = self.create_overlay(image, heatmap, alpha)
@@ -476,11 +602,9 @@ class AnomalyEngine(QObject):
         score = result.get("anomaly_score", 0)
         is_anomaly = result.get("is_anomaly", False)
 
-        # Draw score badge
         status_text = f"ANOMALY {score:.2f}" if is_anomaly else f"NORMAL {score:.2f}"
         color = (0, 0, 220) if is_anomaly else (0, 200, 0)
 
-        # Background box
         label_size, _ = cv2.getTextSize(
             status_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)
         cv2.rectangle(
@@ -491,8 +615,8 @@ class AnomalyEngine(QObject):
             annotated, status_text, (10, 10 + label_size[1]),
             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
 
-        # Threshold + mode line
-        thr_text = f"Threshold: {self.threshold:.1f} | Mode: Standalone (whole image)"
+        thr_text = (f"Thr: {self.threshold:.1f} | Standalone | "
+                    f"{self.backbone_name} {self.image_size[0]}px")
         cv2.putText(
             annotated, thr_text,
             (10, 30 + label_size[1] + 20),
@@ -506,21 +630,7 @@ class AnomalyEngine(QObject):
 
     def predict_on_crops(self, image: np.ndarray,
                          detections: list) -> dict:
-        """
-        YOLO Hybrid: ตรวจ anomaly บน YOLO-cropped regions
-
-        Args:
-            image: full BGR image
-            detections: list of YOLO detections [{bbox, class_name, ...}]
-
-        Returns:
-            {
-                "anomaly_score": float (max across all crops),
-                "is_anomaly": bool,
-                "crop_results": [{crop, score, heatmap, bbox}, ...],
-                "inference_time_ms": float
-            }
-        """
+        """YOLO Hybrid: ตรวจ anomaly บน YOLO-cropped regions"""
         if not detections:
             print("predict_on_crops: no detections — returning empty result")
             return {
@@ -536,7 +646,6 @@ class AnomalyEngine(QObject):
         img_h, img_w = image.shape[:2]
 
         for det in detections:
-            # Filter by class name if specified
             if self.crop_class_name and det.get("class_name") != self.crop_class_name:
                 continue
 
@@ -618,12 +727,13 @@ class AnomalyEngine(QObject):
         n_crops = len(crops_result.get("crop_results", []))
         status = f"ANOMALY {max_score:.2f}" if is_anomaly else f"NORMAL {max_score:.2f}"
         color = (0, 0, 220) if is_anomaly else (0, 200, 0)
-        cv2.rectangle(annotated, (5, 5), (420, 65), color, -1)
+        cv2.rectangle(annotated, (5, 5), (480, 65), color, -1)
         cv2.putText(annotated, status, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        mode_text = f"YOLO Hybrid | {n_crops} crops | Thr: {self.threshold:.1f}"
+        mode_text = (f"YOLO Hybrid | {n_crops} crops | Thr: {self.threshold:.1f} | "
+                     f"{self.backbone_name} {self.image_size[0]}px")
         cv2.putText(annotated, mode_text, (10, 55),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
         return annotated
 
@@ -639,10 +749,13 @@ class AnomalyEngine(QObject):
         data = {
             "memory_bank": self.memory_bank.cpu(),
             "threshold": self.threshold,
-            "image_size": self.IMAGE_SIZE,
+            "image_size": self.image_size,
             "training_images_count": self._training_images_count,
             "use_yolo_crop": self.use_yolo_crop,
             "crop_class_name": self.crop_class_name,
+            "backbone_name": self.backbone_name,
+            "num_neighbors": self.num_neighbors,
+            "version": 2,  # v2 = Level 1 upgrade
         }
 
         with open(path, 'wb') as f:
@@ -654,23 +767,34 @@ class AnomalyEngine(QObject):
         return True
 
     def load_model(self, path: str) -> bool:
-        """โหลด trained model"""
+        """โหลด trained model (backward compatible กับ v1)"""
         try:
             with open(path, 'rb') as f:
                 data = pickle.load(f)
 
-            if not self.is_initialized():
-                self.initialize()
+            # Restore settings from saved model
+            saved_backbone = data.get("backbone_name", "resnet18")
+            saved_image_size = data.get("image_size", (224, 224))
+
+            # Initialize with saved settings
+            if not self.is_initialized() or self.backbone_name != saved_backbone:
+                self.backbone_name = saved_backbone
+                if isinstance(saved_image_size, tuple):
+                    self.image_size = saved_image_size
+                self.initialize(self.device)
 
             self.memory_bank = data["memory_bank"].to(self.device)
             self.threshold = data.get("threshold", 2.5)
             self._training_images_count = data.get("training_images_count", 0)
             self.use_yolo_crop = data.get("use_yolo_crop", True)
             self.crop_class_name = data.get("crop_class_name", "")
+            self.num_neighbors = data.get("num_neighbors", 3)
             self.is_trained = True
 
-            info = (f"Loaded: {self._training_images_count} images, "
-                    f"bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}")
+            version = data.get("version", 1)
+            info = (f"Loaded v{version}: {self._training_images_count} images, "
+                    f"bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}, "
+                    f"{self.backbone_name} {self.image_size[0]}px")
             self.training_progress.emit(info)
             self.model_ready.emit(info)
             print(f"Anomaly model loaded: {path} — {info}")
@@ -691,3 +815,12 @@ class AnomalyEngine(QObject):
     def set_yolo_crop(self, enabled: bool, class_name: str = ""):
         self.use_yolo_crop = enabled
         self.crop_class_name = class_name
+
+    def set_image_size(self, size: int):
+        """เปลี่ยน image size (ต้อง re-initialize หลังเปลี่ยน)"""
+        self.image_size = (size, size)
+
+    def set_backbone(self, name: str):
+        """เปลี่ยน backbone (ต้อง re-initialize หลังเปลี่ยน)"""
+        if name in BACKBONE_CONFIG:
+            self.backbone_name = name
