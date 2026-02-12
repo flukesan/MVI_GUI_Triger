@@ -136,6 +136,9 @@ class AnomalyEngine(QObject):
         try:
             if device == "auto":
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            elif device.isdigit():
+                # YOLO/ultralytics uses '0' for GPU index → convert to 'cuda:0'
+                self.device = f"cuda:{device}" if torch.cuda.is_available() else "cpu"
             else:
                 self.device = device
 
