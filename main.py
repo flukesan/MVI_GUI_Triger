@@ -887,17 +887,25 @@ class InspectionGUI(QMainWindow):
             f"Captured normal image (total: {anomaly.get_training_count()})")
 
     def on_anomaly_load_folder(self):
-        """Load ภาพปกติจาก folder"""
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Folder with Normal Images")
-        if not folder:
+        """Load ภาพปกติจาก folder หรือเลือกไฟล์ภาพ"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Normal Images",
+            "",
+            "Images (*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.tif);;All Files (*)")
+        if not files:
             return
 
         anomaly = self._ensure_anomaly_initialized()
-        count = anomaly.add_normal_images_from_folder(folder)
+        count = 0
+        for file_path in files:
+            image = cv2.imread(file_path)
+            if image is not None:
+                anomaly.add_normal_image(image)
+                count += 1
+
         self.anomaly_train_count_label.setText(
             f"Normal images: {anomaly.get_training_count()}")
-        self.status_bar.showMessage(f"Loaded {count} images from folder")
+        self.status_bar.showMessage(f"Loaded {count} images")
 
     def on_anomaly_clear(self):
         anomaly = self._ensure_anomaly_initialized()
