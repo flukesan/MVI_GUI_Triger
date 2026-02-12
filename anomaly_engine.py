@@ -258,7 +258,7 @@ class AnomalyEngine(QObject):
     def add_normal_images_from_folder(self, folder_path: str) -> int:
         """โหลดภาพปกติจาก folder"""
         folder = Path(folder_path)
-        extensions = {'.jpg', '.jpeg', '.png', '.bmp'}
+        extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'}
         count = 0
 
         for img_path in sorted(folder.iterdir()):
