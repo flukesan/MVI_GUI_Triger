@@ -896,16 +896,42 @@ class InspectionGUI(QMainWindow):
             return
 
         anomaly = self._ensure_anomaly_initialized()
+        use_crop = anomaly.use_yolo_crop and self.detection_engine.is_model_loaded()
         count = 0
+        crop_count = 0
+
         for file_path in files:
             image = cv2.imread(file_path)
-            if image is not None:
+            if image is None:
+                continue
+
+            if use_crop:
+                # YOLO crop ก่อน → เทรน PatchCore บน crop (เหมือนตอน inference)
+                detection = self.detection_engine.detect(image)
+                for det in detection["detections"]:
+                    bbox = det["bbox"]
+                    pad = anomaly.crop_padding
+                    h, w = image.shape[:2]
+                    x1 = max(0, bbox["x"] - pad)
+                    y1 = max(0, bbox["y"] - pad)
+                    x2 = min(w, bbox["x"] + bbox["w"] + pad)
+                    y2 = min(h, bbox["y"] + bbox["h"] + pad)
+                    crop = image[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        anomaly.add_normal_image(crop)
+                        crop_count += 1
+            else:
                 anomaly.add_normal_image(image)
-                count += 1
+
+            count += 1
 
         self.anomaly_train_count_label.setText(
             f"Normal images: {anomaly.get_training_count()}")
-        self.status_bar.showMessage(f"Loaded {count} images")
+        if use_crop:
+            self.status_bar.showMessage(
+                f"Loaded {count} images → {crop_count} YOLO crops added")
+        else:
+            self.status_bar.showMessage(f"Loaded {count} images")
 
     def on_anomaly_clear(self):
         anomaly = self._ensure_anomaly_initialized()
@@ -930,7 +956,12 @@ class InspectionGUI(QMainWindow):
         self.anomaly_train_btn.setEnabled(True)
 
         if success:
-            self.anomaly_status_label.setText("Anomaly: Trained OK")
+            # Update threshold slider to match auto-calibrated value
+            thr_int = int(anomaly.threshold * 10)
+            self.anomaly_threshold_slider.setValue(thr_int)
+            self.anomaly_threshold_label.setText(f"{anomaly.threshold:.1f}")
+            self.anomaly_status_label.setText(
+                f"Anomaly: Trained OK | Threshold: {anomaly.threshold:.1f}")
 
     def on_anomaly_save(self):
         path, _ = QFileDialog.getSaveFileName(

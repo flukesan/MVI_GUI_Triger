@@ -273,12 +273,13 @@ class AnomalyEngine(QObject):
 
         return count
 
-    def train(self, max_memory_size: int = 1500) -> bool:
+    def train(self, max_memory_size: int = 0) -> bool:
         """
         สร้าง Memory Bank จากภาพปกติที่เก็บไว้
 
         Args:
             max_memory_size: จำนวน patch สูงสุดใน memory bank
+                             0 = auto (เก็บ 25% หรือขั้นต่ำ 5000)
         """
         if not self._features_list:
             self.training_progress.emit("Error: No normal images added")
@@ -290,6 +291,12 @@ class AnomalyEngine(QObject):
         all_patches = torch.cat(self._features_list, dim=0)  # (N*784, 384)
         total = all_patches.shape[0]
         print(f"Total patches from {self._training_images_count} images: {total}")
+
+        # Auto memory size: keep 25% of patches (min 5000, max GPU-safe)
+        if max_memory_size <= 0:
+            max_memory_size = max(5000, total // 4)
+            # Limit to avoid GPU OOM (~50k patches ≈ 75MB GPU memory)
+            max_memory_size = min(max_memory_size, 50000)
 
         # Coreset subsampling
         target = min(max_memory_size, total)
@@ -303,14 +310,57 @@ class AnomalyEngine(QObject):
             self.memory_bank = all_patches.to(self.device)
 
         self.is_trained = True
+
+        # ═══ Auto-calibrate threshold ═══
+        self.training_progress.emit("Calibrating threshold on training images...")
+        self._auto_calibrate_threshold()
+
         self._features_list = []  # Free memory
 
         info = (f"Trained: {self._training_images_count} images, "
-                f"memory bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}")
+                f"memory bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}, "
+                f"threshold: {self.threshold:.1f}")
         self.training_progress.emit(f"OK: {info}")
         self.model_ready.emit(info)
         print(info)
         return True
+
+    def _auto_calibrate_threshold(self):
+        """
+        Auto-calibrate threshold จากภาพเทรน
+        วิ่ง inference บน memory bank เอง → หา max normal score → ตั้ง threshold
+        """
+        if self.memory_bank is None:
+            return
+
+        # Sample patches from memory bank → compute self-distance
+        # ใช้ random sample เพื่อความเร็ว
+        n = self.memory_bank.shape[0]
+        sample_size = min(500, n)
+        indices = np.random.choice(n, size=sample_size, replace=False)
+        sample = self.memory_bank[indices]
+
+        # For each sample patch, find distance to nearest OTHER patch
+        chunk_size = 128
+        max_distances = []
+        for i in range(0, sample.shape[0], chunk_size):
+            chunk = sample[i:i + chunk_size]
+            dists = torch.cdist(chunk, self.memory_bank)  # (chunk, N)
+
+            # Set self-distance to inf (don't match with yourself)
+            for j in range(chunk.shape[0]):
+                global_idx = indices[i + j]
+                dists[j, global_idx] = float('inf')
+
+            mins, _ = dists.min(dim=1)
+            max_distances.append(mins.max().item())
+
+        # Threshold = max normal distance × multiplier
+        max_normal_score = max(max_distances) if max_distances else 5.0
+        self.threshold = round(max_normal_score * 2.0, 1)
+
+        print(f"Auto-calibrated: max normal distance={max_normal_score:.2f}, "
+              f"threshold={self.threshold:.1f} (2x multiplier)")
 
     @staticmethod
     def _random_coreset(total: int, target: int) -> list:
