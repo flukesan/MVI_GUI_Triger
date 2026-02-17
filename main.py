@@ -639,9 +639,19 @@ class InspectionGUI(QMainWindow):
         self.anomaly_yolo_crop_cb.setChecked(True)
         self.anomaly_yolo_crop_cb.setToolTip(
             "YOLO detect ก่อน → crop ชิ้นงาน → PatchCore ตรวจ anomaly บน crop\n"
-            "ช่วยให้ไม่ไวต่อตำแหน่งที่เปลี่ยน")
+            "ช่วยให้ไม่ไวต่อตำแหน่งที่เปลี่ยน\n"
+            "พร้อม Per-class model: แยก bank ตาม YOLO class อัตโนมัติ")
         self.anomaly_yolo_crop_cb.stateChanged.connect(self.on_anomaly_yolo_crop_changed)
         left_layout.addWidget(self.anomaly_yolo_crop_cb)
+
+        # Training Augmentation option
+        self.anomaly_augmentation_cb = QCheckBox("Training Augmentation (ทนแสงเปลี่ยน)")
+        self.anomaly_augmentation_cb.setChecked(True)
+        self.anomaly_augmentation_cb.setToolTip(
+            "เพิ่มภาพ augmented (ปรับแสง ±10%) ตอนเทรน\n"
+            "ช่วยให้ทนต่อแสงเปลี่ยนในไลน์ผลิต")
+        self.anomaly_augmentation_cb.stateChanged.connect(self.on_anomaly_augmentation_changed)
+        left_layout.addWidget(self.anomaly_augmentation_cb)
 
         # Step 1: Capture normal images
         step1 = QLabel("Step 1: เก็บภาพ 'ปกติ'")
@@ -701,6 +711,36 @@ class InspectionGUI(QMainWindow):
         self.anomaly_load_btn.clicked.connect(self.on_anomaly_load)
         save_row.addWidget(self.anomaly_load_btn)
         left_layout.addLayout(save_row)
+
+        # Step 4: Validate Model
+        step4 = QLabel("Step 4: Validate Model")
+        step4.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        left_layout.addWidget(step4)
+
+        validate_row = QHBoxLayout()
+        self.anomaly_validate_good_btn = QPushButton("Test Good")
+        self.anomaly_validate_good_btn.setStyleSheet(
+            "QPushButton { background-color: #28a745; color: white; padding: 6px; }"
+            "QPushButton:hover { background-color: #218838; }")
+        self.anomaly_validate_good_btn.setToolTip("ทดสอบด้วยภาพปกติ (ไม่ควรตรวจพบ anomaly)")
+        self.anomaly_validate_good_btn.clicked.connect(self.on_anomaly_validate_good)
+        validate_row.addWidget(self.anomaly_validate_good_btn)
+
+        self.anomaly_validate_bad_btn = QPushButton("Test Bad")
+        self.anomaly_validate_bad_btn.setStyleSheet(
+            "QPushButton { background-color: #dc3545; color: white; padding: 6px; }"
+            "QPushButton:hover { background-color: #c82333; }")
+        self.anomaly_validate_bad_btn.setToolTip("ทดสอบด้วยภาพผิดปกติ (ควรตรวจพบ anomaly)")
+        self.anomaly_validate_bad_btn.clicked.connect(self.on_anomaly_validate_bad)
+        validate_row.addWidget(self.anomaly_validate_bad_btn)
+        left_layout.addLayout(validate_row)
+
+        self.anomaly_validate_result = QLabel("")
+        self.anomaly_validate_result.setWordWrap(True)
+        self.anomaly_validate_result.setStyleSheet(
+            "color: #495057; font-size: 11px; background-color: #f8f9fa; "
+            "padding: 4px; border-radius: 3px;")
+        left_layout.addWidget(self.anomaly_validate_result)
 
         left_layout.addStretch()
         left_group.setLayout(left_layout)
@@ -770,6 +810,78 @@ class InspectionGUI(QMainWindow):
     def on_anomaly_yolo_crop_changed(self, state):
         anomaly = self._ensure_anomaly_initialized()
         anomaly.set_yolo_crop(bool(state))
+
+    def on_anomaly_augmentation_changed(self, state):
+        anomaly = self._ensure_anomaly_initialized()
+        anomaly.set_augmentation(bool(state))
+
+    # ─── Validation ───
+
+    def on_anomaly_validate_good(self):
+        """Validate model with known-good (normal) images"""
+        self._anomaly_validate(is_good=True)
+
+    def on_anomaly_validate_bad(self):
+        """Validate model with known-bad (anomaly) images"""
+        self._anomaly_validate(is_good=False)
+
+    def _anomaly_validate(self, is_good: bool):
+        anomaly = self._ensure_anomaly_initialized()
+        if not anomaly.is_trained:
+            QMessageBox.warning(self, "Warning",
+                "Please train the model first.")
+            return
+
+        label = "Normal (Good)" if is_good else "Abnormal (Bad)"
+        files, _ = QFileDialog.getOpenFileNames(
+            self, f"Select {label} Images", "",
+            "Images (*.jpg *.jpeg *.png *.bmp *.webp *.tiff *.tif);;All Files (*)")
+        if not files:
+            return
+
+        self.anomaly_validate_result.setText("Validating...")
+        QApplication.processEvents()
+
+        images = []
+        for f in files:
+            img = cv2.imread(f)
+            if img is not None:
+                images.append(img)
+
+        if not images:
+            self.anomaly_validate_result.setText("No valid images loaded")
+            return
+
+        if is_good:
+            result = anomaly.validate(normal_images=images)
+        else:
+            result = anomaly.validate(abnormal_images=images)
+
+        lines = []
+        if is_good:
+            total = result["normal_total"]
+            correct = result["normal_correct"]
+            scores = result["normal_scores"]
+            lines.append(f"Good: {correct}/{total} classified as NORMAL")
+            if total > 0:
+                fp_rate = (total - correct) / total * 100
+                lines.append(f"False Positive Rate: {fp_rate:.1f}%")
+            if scores:
+                lines.append(f"Score: min={min(scores):.2f} max={max(scores):.2f} "
+                             f"avg={sum(scores)/len(scores):.2f}")
+        else:
+            total = result["abnormal_total"]
+            correct = result["abnormal_correct"]
+            scores = result["abnormal_scores"]
+            lines.append(f"Bad: {correct}/{total} classified as ANOMALY")
+            if total > 0:
+                fn_rate = (total - correct) / total * 100
+                lines.append(f"False Negative Rate: {fn_rate:.1f}%")
+            if scores:
+                lines.append(f"Score: min={min(scores):.2f} max={max(scores):.2f} "
+                             f"avg={sum(scores)/len(scores):.2f}")
+
+        self.anomaly_validate_result.setText("\n".join(lines))
 
     # ─── Camera Preview for Anomaly Training ───
 
@@ -852,7 +964,7 @@ class InspectionGUI(QMainWindow):
                 "Please click 'Start Preview' first or connect camera.")
             return
 
-        # If YOLO crop enabled and model loaded, crop first
+        # If YOLO crop enabled and model loaded, crop first + per-class tracking
         if anomaly.use_yolo_crop and self.detection_engine.is_model_loaded():
             detection = self.detection_engine.detect(frame)
             for det in detection["detections"]:
@@ -865,7 +977,8 @@ class InspectionGUI(QMainWindow):
                 y2 = min(h, bbox["y"] + bbox["h"] + pad)
                 crop = frame[y1:y2, x1:x2]
                 if crop.size > 0:
-                    count = anomaly.add_normal_image(crop)
+                    cls_name = det.get("class_name", "")
+                    count = anomaly.add_normal_image(crop, class_name=cls_name)
                     self.anomaly_train_count_label.setText(f"Normal images: {count}")
             if not detection["detections"]:
                 QMessageBox.warning(self, "Warning",
@@ -918,7 +1031,8 @@ class InspectionGUI(QMainWindow):
                     y2 = min(h, bbox["y"] + bbox["h"] + pad)
                     crop = image[y1:y2, x1:x2]
                     if crop.size > 0:
-                        anomaly.add_normal_image(crop)
+                        cls_name = det.get("class_name", "")
+                        anomaly.add_normal_image(crop, class_name=cls_name)
                         crop_count += 1
             else:
                 anomaly.add_normal_image(image)
@@ -939,6 +1053,7 @@ class InspectionGUI(QMainWindow):
         self.anomaly_train_count_label.setText("Normal images: 0")
         self.anomaly_train_status.setText("Not trained")
         self.anomaly_status_label.setText("Anomaly: Not trained")
+        self.anomaly_validate_result.setText("")
 
     def on_anomaly_train(self):
         """Train PatchCore model"""
@@ -980,7 +1095,20 @@ class InspectionGUI(QMainWindow):
             if anomaly.load_model(path):
                 self.anomaly_train_count_label.setText(
                     f"Normal images: {anomaly.get_training_count()}")
-                self.anomaly_status_label.setText("Anomaly: Model loaded")
+                # Sync UI with loaded model settings
+                thr_int = int(anomaly.threshold * 10)
+                self.anomaly_threshold_slider.setValue(thr_int)
+                self.anomaly_threshold_label.setText(f"{anomaly.threshold:.1f}")
+                self.anomaly_augmentation_cb.setChecked(anomaly.use_augmentation)
+                self.anomaly_yolo_crop_cb.setChecked(anomaly.use_yolo_crop)
+                # Show per-class info
+                per_cls = anomaly.get_per_class_info()
+                if per_cls:
+                    cls_str = ", ".join(f"{k}" for k in per_cls)
+                    self.anomaly_status_label.setText(
+                        f"Anomaly: Model loaded | Per-class: [{cls_str}]")
+                else:
+                    self.anomaly_status_label.setText("Anomaly: Model loaded")
 
     def on_anomaly_threshold_changed(self, value):
         thr = value / 10.0

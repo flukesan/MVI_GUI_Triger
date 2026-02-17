@@ -18,12 +18,18 @@ Level 1 Upgrades:
 - Full-inference auto-threshold calibration
 - Configurable image size (224/256/320/448)
 - L2 feature normalization + K-nearest neighbor averaging
+
+Level 2 Upgrades:
+- Score normalization (0-100 scale)
+- Training data augmentation (brightness/contrast jitter)
+- Per-class anomaly models (separate PatchCore per YOLO class)
+- Validation API (test model with good/bad images)
 """
 
 import time
 import pickle
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 import cv2
 import numpy as np
@@ -106,6 +112,18 @@ class AnomalyEngine(QObject):
         self.use_yolo_crop: bool = True
         self.crop_class_name: str = ""  # empty = crop any detection
         self.crop_padding: int = 20     # pixels padding around crop
+
+        # Level 2: Training augmentation
+        self.use_augmentation: bool = True
+        self.augmentation_factor: int = 2  # augmented copies per image
+
+        # Level 2: Score normalization calibration
+        self._calibration_stats: dict = {}  # {mean, std, max_score}
+
+        # Level 2: Per-class models (YOLO Hybrid)
+        self._per_class_features: Dict[str, List[torch.Tensor]] = {}
+        self._per_class_banks: Dict[str, torch.Tensor] = {}
+        self._per_class_thresholds: Dict[str, float] = {}
 
     # ═══════════════════════════════════════════
     #  INITIALIZATION
@@ -290,19 +308,74 @@ class AnomalyEngine(QObject):
         return patches, (H, W)
 
     # ═══════════════════════════════════════════
+    #  DATA AUGMENTATION
+    # ═══════════════════════════════════════════
+
+    def _augment_image(self, image: np.ndarray) -> List[np.ndarray]:
+        """
+        Generate subtle augmented copies for training robustness
+        ช่วยให้ทนต่อแสงเปลี่ยนในไลน์ผลิต
+        """
+        augmented = []
+
+        # Brightness +10%
+        augmented.append(cv2.convertScaleAbs(image, alpha=1.1, beta=8))
+
+        # Brightness -10%
+        augmented.append(cv2.convertScaleAbs(image, alpha=0.9, beta=-8))
+
+        if self.augmentation_factor > 2:
+            # Horizontal flip
+            augmented.append(cv2.flip(image, 1))
+
+        if self.augmentation_factor > 3:
+            # Slight Gaussian blur (simulates slight defocus)
+            augmented.append(cv2.GaussianBlur(image, (3, 3), 0.5))
+
+        return augmented[:self.augmentation_factor]
+
+    # ═══════════════════════════════════════════
     #  TRAINING
     # ═══════════════════════════════════════════
 
-    def add_normal_image(self, image: np.ndarray) -> int:
-        """เพิ่มภาพ "ปกติ" สำหรับเทรน"""
+    def add_normal_image(self, image: np.ndarray, class_name: str = "") -> int:
+        """
+        เพิ่มภาพ "ปกติ" สำหรับเทรน (+ augmentation ถ้าเปิด)
+
+        Args:
+            image: BGR image
+            class_name: YOLO class name สำหรับ per-class model (optional)
+        """
         if not self.is_initialized():
             raise RuntimeError("Engine not initialized")
 
         patches, _ = self._extract_features(image)
         self._features_list.append(patches.cpu())
+
+        # Per-class tracking
+        if class_name:
+            if class_name not in self._per_class_features:
+                self._per_class_features[class_name] = []
+            self._per_class_features[class_name].append(patches.cpu())
+
+        # Augmentation
+        aug_count = 0
+        if self.use_augmentation:
+            for aug_img in self._augment_image(image):
+                aug_patches, _ = self._extract_features(aug_img)
+                self._features_list.append(aug_patches.cpu())
+                if class_name:
+                    self._per_class_features[class_name].append(aug_patches.cpu())
+                aug_count += 1
+
         self._training_images_count += 1
 
-        msg = f"Added normal image #{self._training_images_count} ({patches.shape[0]} patches)"
+        msg = f"Added normal image #{self._training_images_count} ({patches.shape[0]} patches"
+        if aug_count > 0:
+            msg += f" + {aug_count} augmented"
+        if class_name:
+            msg += f" [{class_name}]"
+        msg += ")"
         self.training_progress.emit(msg)
         print(msg)
 
@@ -348,7 +421,7 @@ class AnomalyEngine(QObject):
             max_memory_size = max(5000, total // 4)
             max_memory_size = min(max_memory_size, 50000)
 
-        # ═══ Greedy K-Center Coreset ═══
+        # ═══ Greedy K-Center Coreset (Global) ═══
         target = min(max_memory_size, total)
         if total > target:
             self.training_progress.emit(
@@ -360,20 +433,91 @@ class AnomalyEngine(QObject):
 
         self.is_trained = True
 
+        # ═══ Per-class Memory Banks ═══
+        self._per_class_banks = {}
+        self._per_class_thresholds = {}
+        if self._per_class_features:
+            self._build_per_class_banks()
+
         # ═══ Full-inference auto-threshold ═══
         self.training_progress.emit("Calibrating threshold on training images...")
         self._auto_calibrate_threshold_full(all_patches)
 
+        # ═══ Per-class threshold calibration ═══
+        if self._per_class_features:
+            self._calibrate_per_class_thresholds()
+
         self._features_list = []  # Free memory
 
+        # Build info string
         info = (f"Trained: {self._training_images_count} images, "
                 f"bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}, "
                 f"backbone={self.backbone_name}, img={self.image_size[0]}px, "
                 f"K={self.num_neighbors}, threshold={self.threshold:.1f}")
+        if self._per_class_banks:
+            cls_info = ", ".join(
+                f"{k}({v.shape[0]})" for k, v in self._per_class_banks.items())
+            info += f", per-class=[{cls_info}]"
+        if self.use_augmentation:
+            info += f", aug={self.augmentation_factor}x"
+
         self.training_progress.emit(f"OK: {info}")
         self.model_ready.emit(info)
         print(info)
         return True
+
+    def _build_per_class_banks(self):
+        """Build separate memory banks for each YOLO class"""
+        for cls_name, feat_list in self._per_class_features.items():
+            cls_patches = torch.cat(feat_list, dim=0)
+            cls_total = cls_patches.shape[0]
+
+            # Smaller coreset per class
+            cls_target = max(1000, cls_total // 4)
+            cls_target = min(cls_target, 20000)
+
+            self.training_progress.emit(
+                f"Building per-class bank: {cls_name} ({cls_total} patches)...")
+
+            if cls_total > cls_target:
+                indices = self._greedy_coreset(cls_patches, cls_target)
+                self._per_class_banks[cls_name] = cls_patches[indices].to(self.device)
+            else:
+                self._per_class_banks[cls_name] = cls_patches.to(self.device)
+
+            print(f"Per-class bank [{cls_name}]: {self._per_class_banks[cls_name].shape[0]} patches")
+
+    def _calibrate_per_class_thresholds(self):
+        """Calibrate threshold for each per-class bank"""
+        spatial = self.image_size[0] // 8
+        patches_per_image = spatial * spatial
+
+        for cls_name, feat_list in self._per_class_features.items():
+            if cls_name not in self._per_class_banks:
+                continue
+
+            bank = self._per_class_banks[cls_name]
+            cls_patches = torch.cat(feat_list, dim=0)
+            n_images = cls_patches.shape[0] // patches_per_image
+
+            scores = []
+            for i in range(n_images):
+                start = i * patches_per_image
+                end = start + patches_per_image
+                if end > cls_patches.shape[0]:
+                    break
+                img_p = cls_patches[start:end].to(self.device)
+                score = self._compute_anomaly_score_with_bank(img_p, bank)
+                scores.append(score)
+
+            if scores:
+                max_s = max(scores)
+                mean_s = sum(scores) / len(scores)
+                std_s = (sum((s - mean_s) ** 2 for s in scores) / len(scores)) ** 0.5
+                thr = round(max(mean_s + 3 * std_s, max_s * 1.5), 1)
+                self._per_class_thresholds[cls_name] = thr
+                print(f"Per-class threshold [{cls_name}]: {thr:.1f} "
+                      f"(mean={mean_s:.2f}, max={max_s:.2f})")
 
     def _greedy_coreset(self, all_patches: torch.Tensor, target: int) -> list:
         """
@@ -427,10 +571,6 @@ class AnomalyEngine(QObject):
         if self.memory_bank is None:
             return
 
-        # Compute per-image scores (simulate actual inference)
-        config = BACKBONE_CONFIG[self.backbone_name]
-        feature_dim = config["feature_dim"]
-
         # Calculate patches per image from image_size
         # For ResNet-like: spatial = image_size / 8 (after layer2)
         spatial = self.image_size[0] // 8
@@ -448,7 +588,7 @@ class AnomalyEngine(QObject):
             img_patches = all_patches[start:end].to(self.device)
 
             # KNN scoring (same as predict)
-            score = self._compute_anomaly_score(img_patches)
+            score = self._compute_anomaly_score_with_bank(img_patches, self.memory_bank)
             all_scores.append(score)
 
         if all_scores:
@@ -456,6 +596,13 @@ class AnomalyEngine(QObject):
             mean_normal = sum(all_scores) / len(all_scores)
             std_normal = (sum((s - mean_normal)**2 for s in all_scores)
                          / len(all_scores)) ** 0.5
+
+            # Store calibration stats for score normalization
+            self._calibration_stats = {
+                "mean": mean_normal,
+                "std": std_normal,
+                "max_score": max_normal,
+            }
 
             # Threshold = mean + 3*std (or max*1.5, whichever is larger)
             threshold_stat = mean_normal + 3 * std_normal
@@ -467,15 +614,17 @@ class AnomalyEngine(QObject):
                   f"max={max_normal:.2f} → threshold={self.threshold:.1f}")
         else:
             self.threshold = 5.0
+            self._calibration_stats = {}
             print("Auto-threshold: no images to calibrate, using default 5.0")
 
-    def _compute_anomaly_score(self, patches: torch.Tensor) -> float:
-        """Compute anomaly score from patches (shared by predict + calibration)"""
+    def _compute_anomaly_score_with_bank(self, patches: torch.Tensor,
+                                          bank: torch.Tensor) -> float:
+        """Compute anomaly score from patches against a specific memory bank"""
         chunk_size = 256
         min_distances = []
         for i in range(0, patches.shape[0], chunk_size):
             chunk = patches[i:i + chunk_size]
-            dists = torch.cdist(chunk, self.memory_bank)  # (chunk, N)
+            dists = torch.cdist(chunk, bank)  # (chunk, N)
 
             if self.num_neighbors > 1:
                 # Top-K nearest neighbor: average of K smallest distances
@@ -492,6 +641,26 @@ class AnomalyEngine(QObject):
         # Score = max patch distance (most anomalous patch)
         return float(min_distances.max().item())
 
+    def _compute_distances_with_bank(self, patches: torch.Tensor,
+                                      bank: torch.Tensor) -> torch.Tensor:
+        """Compute per-patch distances against a memory bank (for heatmap)"""
+        chunk_size = 256
+        min_distances = []
+        for i in range(0, patches.shape[0], chunk_size):
+            chunk = patches[i:i + chunk_size]
+            dists = torch.cdist(chunk, bank)
+
+            if self.num_neighbors > 1:
+                k = min(self.num_neighbors, dists.shape[1])
+                topk, _ = dists.topk(k, dim=1, largest=False)
+                mins = topk.mean(dim=1)
+            else:
+                mins, _ = dists.min(dim=1)
+
+            min_distances.append(mins)
+
+        return torch.cat(min_distances)
+
     @staticmethod
     def _random_coreset(total: int, target: int) -> list:
         """Random subsampling (legacy fallback)"""
@@ -506,28 +675,65 @@ class AnomalyEngine(QObject):
         self._training_images_count = 0
         self.memory_bank = None
         self.is_trained = False
+        self._per_class_features = {}
+        self._per_class_banks = {}
+        self._per_class_thresholds = {}
+        self._calibration_stats = {}
         self.training_progress.emit("Training data cleared")
+
+    # ═══════════════════════════════════════════
+    #  SCORE NORMALIZATION
+    # ═══════════════════════════════════════════
+
+    def normalize_score(self, raw_score: float) -> float:
+        """
+        Convert raw anomaly score to 0-100 scale
+
+        0   = mean of normal images (baseline)
+        100 = threshold (decision boundary)
+        >100 = anomaly
+        """
+        if self._calibration_stats:
+            mean = self._calibration_stats.get("mean", 0)
+            denom = max(self.threshold - mean, 0.01)
+            pct = (raw_score - mean) / denom * 100
+        else:
+            # Fallback: threshold = 100%
+            pct = (raw_score / max(self.threshold, 0.01)) * 100
+        return round(max(0, min(200, pct)), 1)
 
     # ═══════════════════════════════════════════
     #  PREDICTION
     # ═══════════════════════════════════════════
 
-    def predict(self, image: np.ndarray) -> dict:
+    def predict(self, image: np.ndarray,
+                bank: Optional[torch.Tensor] = None,
+                threshold: Optional[float] = None) -> dict:
         """
         ตรวจจับ anomaly ในภาพ
+
+        Args:
+            image: BGR image
+            bank: memory bank to use (None = global bank)
+            threshold: threshold to use (None = global threshold)
 
         Returns:
             {
                 "anomaly_score": float,
+                "score_normalized": float (0-100 scale),
                 "is_anomaly": bool,
                 "heatmap": np.ndarray (H, W, 3) — color heatmap
                 "heatmap_raw": np.ndarray (H, W) — raw distances
                 "inference_time_ms": float
             }
         """
-        if not self.is_trained or self.memory_bank is None:
+        use_bank = bank if bank is not None else self.memory_bank
+        use_threshold = threshold if threshold is not None else self.threshold
+
+        if not self.is_trained or use_bank is None:
             return {
                 "anomaly_score": 0.0,
+                "score_normalized": 0.0,
                 "is_anomaly": False,
                 "heatmap": None,
                 "heatmap_raw": None,
@@ -538,25 +744,11 @@ class AnomalyEngine(QObject):
 
         patches, (H, W) = self._extract_features(image)
 
-        # KNN scoring with K neighbors
-        chunk_size = 256
-        min_distances = []
-        for i in range(0, patches.shape[0], chunk_size):
-            chunk = patches[i:i + chunk_size]
-            dists = torch.cdist(chunk, self.memory_bank)
-
-            if self.num_neighbors > 1:
-                k = min(self.num_neighbors, dists.shape[1])
-                topk, _ = dists.topk(k, dim=1, largest=False)
-                mins = topk.mean(dim=1)
-            else:
-                mins, _ = dists.min(dim=1)
-
-            min_distances.append(mins)
-
-        min_distances = torch.cat(min_distances)
+        # KNN distance computation
+        min_distances = self._compute_distances_with_bank(patches, use_bank)
 
         anomaly_score = float(min_distances.max().item())
+        score_normalized = self.normalize_score(anomaly_score)
 
         # Heatmap: reshape to spatial dimensions
         heatmap_raw = min_distances.reshape(H, W).cpu().numpy()
@@ -577,7 +769,8 @@ class AnomalyEngine(QObject):
 
         return {
             "anomaly_score": round(anomaly_score, 3),
-            "is_anomaly": anomaly_score > self.threshold,
+            "score_normalized": score_normalized,
+            "is_anomaly": anomaly_score > use_threshold,
             "heatmap": heatmap_color,
             "heatmap_raw": heatmap_resized,
             "inference_time_ms": round(inference_ms, 1)
@@ -600,9 +793,11 @@ class AnomalyEngine(QObject):
             annotated = image.copy()
 
         score = result.get("anomaly_score", 0)
+        score_pct = result.get("score_normalized", 0)
         is_anomaly = result.get("is_anomaly", False)
 
-        status_text = f"ANOMALY {score:.2f}" if is_anomaly else f"NORMAL {score:.2f}"
+        status_text = (f"ANOMALY {score:.2f} ({score_pct:.0f}%)" if is_anomaly
+                       else f"NORMAL {score:.2f} ({score_pct:.0f}%)")
         color = (0, 0, 220) if is_anomaly else (0, 200, 0)
 
         label_size, _ = cv2.getTextSize(
@@ -630,11 +825,15 @@ class AnomalyEngine(QObject):
 
     def predict_on_crops(self, image: np.ndarray,
                          detections: list) -> dict:
-        """YOLO Hybrid: ตรวจ anomaly บน YOLO-cropped regions"""
+        """
+        YOLO Hybrid: ตรวจ anomaly บน YOLO-cropped regions
+        ใช้ per-class bank ถ้ามี, ไม่งั้นใช้ global bank
+        """
         if not detections:
             print("predict_on_crops: no detections — returning empty result")
             return {
                 "anomaly_score": 0.0,
+                "score_normalized": 0.0,
                 "is_anomaly": False,
                 "crop_results": [],
                 "inference_time_ms": 0.0
@@ -659,12 +858,20 @@ class AnomalyEngine(QObject):
             if crop.size == 0:
                 continue
 
-            result = self.predict(crop)
+            # Per-class bank selection
+            cls = det.get("class_name", "")
+            if cls and cls in self._per_class_banks:
+                bank = self._per_class_banks[cls]
+                threshold = self._per_class_thresholds.get(cls, self.threshold)
+                result = self.predict(crop, bank=bank, threshold=threshold)
+            else:
+                result = self.predict(crop)
 
             crop_results.append({
                 "bbox": {"x": x, "y": y, "w": x2 - x, "h": y2 - y},
-                "class_name": det.get("class_name", ""),
+                "class_name": cls,
                 "anomaly_score": result["anomaly_score"],
+                "score_normalized": result["score_normalized"],
                 "is_anomaly": result["is_anomaly"],
                 "heatmap": result["heatmap"],
             })
@@ -675,6 +882,7 @@ class AnomalyEngine(QObject):
 
         return {
             "anomaly_score": round(max_score, 3),
+            "score_normalized": self.normalize_score(max_score),
             "is_anomaly": max_score > self.threshold,
             "crop_results": crop_results,
             "inference_time_ms": round(inference_ms, 1)
@@ -691,6 +899,7 @@ class AnomalyEngine(QObject):
             x, y, w, h = bbox["x"], bbox["y"], bbox["w"], bbox["h"]
             is_anomaly = crop_res["is_anomaly"]
             score = crop_res["anomaly_score"]
+            score_pct = crop_res.get("score_normalized", 0)
 
             # Overlay heatmap on crop region
             heatmap = crop_res.get("heatmap")
@@ -705,7 +914,7 @@ class AnomalyEngine(QObject):
             cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 2)
 
             # Label
-            label = f"{'ANOMALY' if is_anomaly else 'OK'} {score:.2f}"
+            label = f"{'ANOMALY' if is_anomaly else 'OK'} {score:.2f} ({score_pct:.0f}%)"
             cls = crop_res.get("class_name", "")
             if cls:
                 label = f"{cls}: {label}"
@@ -723,19 +932,115 @@ class AnomalyEngine(QObject):
 
         # Global status badge
         max_score = crops_result.get("anomaly_score", 0)
+        max_pct = crops_result.get("score_normalized", 0)
         is_anomaly = crops_result.get("is_anomaly", False)
         n_crops = len(crops_result.get("crop_results", []))
-        status = f"ANOMALY {max_score:.2f}" if is_anomaly else f"NORMAL {max_score:.2f}"
+        status = (f"ANOMALY {max_score:.2f} ({max_pct:.0f}%)" if is_anomaly
+                  else f"NORMAL {max_score:.2f} ({max_pct:.0f}%)")
         color = (0, 0, 220) if is_anomaly else (0, 200, 0)
-        cv2.rectangle(annotated, (5, 5), (480, 65), color, -1)
+        cv2.rectangle(annotated, (5, 5), (520, 65), color, -1)
         cv2.putText(annotated, status, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+        n_cls = len(self._per_class_banks)
+        mode_extra = f" | {n_cls} class models" if n_cls > 0 else ""
         mode_text = (f"YOLO Hybrid | {n_crops} crops | Thr: {self.threshold:.1f} | "
-                     f"{self.backbone_name} {self.image_size[0]}px")
+                     f"{self.backbone_name} {self.image_size[0]}px{mode_extra}")
         cv2.putText(annotated, mode_text, (10, 55),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
         return annotated
+
+    # ═══════════════════════════════════════════
+    #  VALIDATION
+    # ═══════════════════════════════════════════
+
+    def validate(self, normal_images: List[np.ndarray] = None,
+                 abnormal_images: List[np.ndarray] = None) -> dict:
+        """
+        Validate model performance with labeled images
+
+        Args:
+            normal_images: list of known-good (normal) images
+            abnormal_images: list of known-bad (anomaly) images
+
+        Returns:
+            {
+                "normal_scores": [...],
+                "abnormal_scores": [...],
+                "normal_correct": int,
+                "normal_total": int,
+                "abnormal_correct": int,
+                "abnormal_total": int,
+                "accuracy": float (0-100%),
+                "suggested_threshold": float,
+            }
+        """
+        result = {
+            "normal_scores": [],
+            "abnormal_scores": [],
+            "normal_correct": 0,
+            "normal_total": 0,
+            "abnormal_correct": 0,
+            "abnormal_total": 0,
+            "accuracy": 0.0,
+            "suggested_threshold": self.threshold,
+        }
+
+        if not self.is_trained:
+            return result
+
+        # Test normal images
+        if normal_images:
+            for i, img in enumerate(normal_images):
+                pred = self.predict(img)
+                score = pred["anomaly_score"]
+                result["normal_scores"].append(score)
+                result["normal_total"] += 1
+                if not pred["is_anomaly"]:
+                    result["normal_correct"] += 1
+                if (i + 1) % 5 == 0:
+                    self.training_progress.emit(
+                        f"Validating normal: {i+1}/{len(normal_images)}")
+
+        # Test abnormal images
+        if abnormal_images:
+            for i, img in enumerate(abnormal_images):
+                pred = self.predict(img)
+                score = pred["anomaly_score"]
+                result["abnormal_scores"].append(score)
+                result["abnormal_total"] += 1
+                if pred["is_anomaly"]:
+                    result["abnormal_correct"] += 1
+                if (i + 1) % 5 == 0:
+                    self.training_progress.emit(
+                        f"Validating abnormal: {i+1}/{len(abnormal_images)}")
+
+        # Calculate accuracy
+        total_correct = result["normal_correct"] + result["abnormal_correct"]
+        total_all = result["normal_total"] + result["abnormal_total"]
+        if total_all > 0:
+            result["accuracy"] = round(total_correct / total_all * 100, 1)
+
+        # Suggest optimal threshold (only if both normal and abnormal provided)
+        if result["normal_scores"] and result["abnormal_scores"]:
+            max_normal = max(result["normal_scores"])
+            min_abnormal = min(result["abnormal_scores"])
+            if min_abnormal > max_normal:
+                # Perfect separation: threshold between max-normal and min-abnormal
+                result["suggested_threshold"] = round(
+                    (max_normal + min_abnormal) / 2, 1)
+            else:
+                # Overlap: use mean + 2*std of normal scores
+                mean_n = sum(result["normal_scores"]) / len(result["normal_scores"])
+                std_n = (sum((s - mean_n) ** 2 for s in result["normal_scores"])
+                        / len(result["normal_scores"])) ** 0.5
+                result["suggested_threshold"] = round(mean_n + 2 * std_n, 1)
+
+        self.training_progress.emit(
+            f"Validation done: accuracy={result['accuracy']:.1f}%")
+
+        return result
 
     # ═══════════════════════════════════════════
     #  SAVE / LOAD
@@ -755,7 +1060,13 @@ class AnomalyEngine(QObject):
             "crop_class_name": self.crop_class_name,
             "backbone_name": self.backbone_name,
             "num_neighbors": self.num_neighbors,
-            "version": 2,  # v2 = Level 1 upgrade
+            # Level 2 fields
+            "calibration_stats": self._calibration_stats,
+            "per_class_banks": {k: v.cpu() for k, v in self._per_class_banks.items()},
+            "per_class_thresholds": self._per_class_thresholds,
+            "use_augmentation": self.use_augmentation,
+            "augmentation_factor": self.augmentation_factor,
+            "version": 3,  # v3 = Level 2 upgrade
         }
 
         with open(path, 'wb') as f:
@@ -767,7 +1078,7 @@ class AnomalyEngine(QObject):
         return True
 
     def load_model(self, path: str) -> bool:
-        """โหลด trained model (backward compatible กับ v1)"""
+        """โหลด trained model (backward compatible กับ v1/v2)"""
         try:
             with open(path, 'rb') as f:
                 data = pickle.load(f)
@@ -789,12 +1100,26 @@ class AnomalyEngine(QObject):
             self.use_yolo_crop = data.get("use_yolo_crop", True)
             self.crop_class_name = data.get("crop_class_name", "")
             self.num_neighbors = data.get("num_neighbors", 3)
+
+            # Level 2 fields
+            self._calibration_stats = data.get("calibration_stats", {})
+            per_class = data.get("per_class_banks", {})
+            self._per_class_banks = {
+                k: v.to(self.device) for k, v in per_class.items()}
+            self._per_class_thresholds = data.get("per_class_thresholds", {})
+            self.use_augmentation = data.get("use_augmentation", True)
+            self.augmentation_factor = data.get("augmentation_factor", 2)
+
             self.is_trained = True
 
             version = data.get("version", 1)
             info = (f"Loaded v{version}: {self._training_images_count} images, "
                     f"bank {self.memory_bank.shape[0]}x{self.memory_bank.shape[1]}, "
                     f"{self.backbone_name} {self.image_size[0]}px")
+            if self._per_class_banks:
+                cls_list = ", ".join(self._per_class_banks.keys())
+                info += f", per-class=[{cls_list}]"
+
             self.training_progress.emit(info)
             self.model_ready.emit(info)
             print(f"Anomaly model loaded: {path} — {info}")
@@ -824,3 +1149,18 @@ class AnomalyEngine(QObject):
         """เปลี่ยน backbone (ต้อง re-initialize หลังเปลี่ยน)"""
         if name in BACKBONE_CONFIG:
             self.backbone_name = name
+
+    def set_augmentation(self, enabled: bool, factor: int = 2):
+        """เปิด/ปิด training augmentation"""
+        self.use_augmentation = enabled
+        self.augmentation_factor = max(1, min(4, factor))
+
+    def get_per_class_info(self) -> Dict[str, dict]:
+        """Get info about per-class models"""
+        info = {}
+        for cls_name, bank in self._per_class_banks.items():
+            info[cls_name] = {
+                "bank_size": bank.shape[0],
+                "threshold": self._per_class_thresholds.get(cls_name, self.threshold),
+            }
+        return info
