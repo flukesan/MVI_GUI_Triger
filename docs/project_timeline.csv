@@ -1,0 +1,30 @@
+Phase,Task No,Task,Description,Problem/Issue,Root Cause,Solution,Status,Start Date,End Date,Priority,Assignee,Remark
+Phase 1: Foundation,1.1,Camera Manager Backend,รองรับ USB/RTSP/GigE camera backends,GigE crash เมื่อ harvesters ไม่พร้อม,__del__ เรียก attribute ที่ยังไม่ได้ init,Initialize ALL attributes ก่อน check HARVESTERS_AVAILABLE,Done,,,High,,OpenCV + GigE Vision
+Phase 1: Foundation,1.2,Camera Profile System,บันทึก/โหลด camera profiles (JSON),เลือก camera แล้วไม่เชื่อมต่อ,Profile index ไม่ตรงกับ combo box,แก้ logic การเลือก profile,Done,,,High,,camera_profiles.json
+Phase 1: Foundation,1.3,Camera Stream Worker,QThread สำหรับ stream กล้อง,Preview กระตุก / double sleep,Sleep interval ไม่หัก grab time ออก,Adaptive sleep (interval - grab_time),Done,,,Medium,,30fps smooth preview
+Phase 2: YOLO Detection,2.1,Detection Engine,YOLOv8 inference via ultralytics,Device string error '0' vs 'cuda:0',YOLO ใช้ '0' แต่ PyTorch ต้อง 'cuda:0',เพิ่ม device.isdigit() conversion,Done,,,High,,GPU RTX 4000 Ada
+Phase 2: YOLO Detection,2.2,Inspection Controller,Flow control: Capture/Realtime modes,Realtime mode stuttering,Detection blocking GUI thread,DetectionWorker QThread + cache overlay,Done,,,High,,Background thread pattern
+Phase 2: YOLO Detection,2.3,Component Definition,SQLite DB สำหรับ expected parts,,,,Done,,,Medium,,component_definition.py
+Phase 3: Anomaly Detection,3.1,PatchCore Basic,ResNet18 feature extraction + memory bank,ResNet18 offline loading error,ไม่มี internet / cache ว่าง,3-tier fallback: cache > local .pth > random weights,Done,,,High,,anomaly_engine.py v1
+Phase 3: Anomaly Detection,3.2,YOLO Hybrid Mode,YOLO crop + PatchCore บน crop,YOLO Crop เปิดแต่ใช้ Standalone,ไม่ได้เช็ค is_model_loaded() ก่อน crop,เพิ่ม explicit check + debug logging,Done,,,Critical,,ทนตำแหน่งขยับ
+Phase 3: Anomaly Detection,3.3,Camera Preview (Anomaly Tab),Realtime preview ก่อน capture,AttributeError: frame_display,GUI ไม่มี signal frame_display,ลบ emit เปลี่ยนเป็น green border flash,Done,,,Medium,,
+Phase 3: Anomaly Detection,3.4,Load from Folder,เลือกไฟล์ภาพสำหรับเทรน,เลือกไฟล์ไม่ได้ (เป็น folder picker),ใช้ getExistingDirectory(),เปลี่ยนเป็น getOpenFileNames() + image filter,Done,,,Medium,,รองรับ .webp/.tiff
+Phase 3: Anomaly Detection,3.5,YOLO Crop on Load,ใช้ YOLO crop ตอนโหลดภาพเทรน,เทรนภาพเต็ม แต่ inference ใช้ crop,Training/inference mismatch,เพิ่ม YOLO crop ใน on_anomaly_load_folder(),Done,,,Critical,,ต้อง match กัน
+Phase 3: Anomaly Detection,3.6,Auto Threshold (Basic),ตั้ง threshold อัตโนมัติ,ภาพเทรนถูกตรวจเป็น ANOMALY ทั้งหมด (score 7-8),Memory bank เล็กเกินไป (1500 patches / 4.8%),เพิ่ม bank size 25% min 5000 + auto-threshold,Done,,,Critical,,
+Phase 4: Level 1 Upgrade,4.1,WideResNet50 Backbone,อัพเกรดจาก ResNet18 (384D) เป็น WideResNet50 (1536D),,,,Done,,,High,,4x feature dimensions
+Phase 4: Level 1 Upgrade,4.2,Greedy K-Center Coreset,แทน random sampling ด้วย greedy coreset,,,,Done,,,High,,ครอบคลุม feature space ดีกว่า
+Phase 4: Level 1 Upgrade,4.3,Full-inference Auto Threshold,จำลอง inference บนภาพเทรน → calibrate threshold,,,,Done,,,High,,mean + 3*std or max*1.5
+Phase 4: Level 1 Upgrade,4.4,Configurable Image Size,รองรับ 224/256/320/448 px (default 256),,,,Done,,,Medium,,รองรับชิ้นงานขนาดใหญ่
+Phase 4: Level 1 Upgrade,4.5,L2 Normalization + K=3 KNN,Normalize features + average K=3 neighbors,,,,Done,,,High,,ลด noise / stable scoring
+Phase 4: Level 1 Upgrade,4.6,Backbone Config System,Swappable backbone (wide_resnet50/resnet18),,,,Done,,,Medium,,model save v2 backward compatible
+Phase 5: Level 2 Upgrade,5.1,Score Normalization,แปลง raw distance เป็น 0-100% scale,,,,Done,,,Medium,,0=normal 100=threshold
+Phase 5: Level 2 Upgrade,5.2,Training Augmentation,Brightness ±10% jitter (2 augmented/image),,,,Done,,,High,,ทนแสงเปลี่ยนในไลน์ผลิต
+Phase 5: Level 2 Upgrade,5.3,Per-class Anomaly Model,แยก memory bank ตาม YOLO class,,,,Done,,,High,,auto per-class threshold
+Phase 5: Level 2 Upgrade,5.4,Validation UI,ปุ่ม Test Good / Test Bad + FP/FN rate,,,,Done,,,Medium,,ทดสอบก่อน deploy
+Phase 5: Level 2 Upgrade,5.5,Model Save v3,รองรับ per-class banks + calibration stats,,,,Done,,,Low,,backward compatible v1/v2
+Phase 6: Production Ready,6.1,Custom YOLO Training,เทรน YOLO เฉพาะชิ้นงานจริง,,,,Pending,,,High,,แทน generic yolov8x.pt
+Phase 6: Production Ready,6.2,WideResNet50 Weights Offline,คัดลอก wide_resnet50_2-95faca4d.pth ไปเครื่อง production,,,,Pending,,,Critical,,เครื่องไม่มี internet
+Phase 6: Production Ready,6.3,Re-train with New Engine,เทรน PatchCore ใหม่ด้วย WideResNet50 + augmentation,,,,Pending,,,High,,ต้องทำหลังติดตั้ง weights
+Phase 6: Production Ready,6.4,Validate Accuracy,ทดสอบ accuracy ด้วยภาพ good/bad จริง,,,,Pending,,,High,,ใช้ Validation UI ใหม่
+Phase 6: Production Ready,6.5,DeviceWise Integration,เชื่อมต่อระบบ PLC/IoT ผ่าน REST API,,,,Pending,,,Medium,,รองรับ trigger จากภายนอก
+Phase 6: Production Ready,6.6,Backbone/Image Size Selector,เพิ่ม ComboBox เลือก backbone + image size ใน GUI,,,,Pending,,,Low,,Optional UI enhancement
