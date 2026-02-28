@@ -1,0 +1,23 @@
+# AI Features Dependencies for MVI GUI
+# Install with: pip install -r requirements-ai.txt
+
+# Core AI
+requests>=2.31.0
+
+# PDF Processing (for Document RAG)
+PyMuPDF>=1.23.0  # for PDF text extraction
+pdfplumber>=0.10.0  # alternative PDF reader (optional)
+
+# Document Processing
+python-docx>=1.0.0  # for Word documents (optional)
+openpyxl>=3.1.0  # for Excel files (optional)
+
+# Note: Ollama must be installed separately
+# Installation:
+# - Linux/Mac: curl -fsSL https://ollama.com/install.sh | sh
+# - Windows: Download from https://ollama.com
+#
+# After installing Ollama, pull models:
+# ollama pull llama3.2       # Text model (3B - fast)
+# ollama pull mistral        # Text model (7B - better accuracy)
+# ollama pull llava          # Vision model (for image analysis)

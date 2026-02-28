@@ -16,7 +16,7 @@ try:
         QRadioButton, QCheckBox
     )
     from PyQt6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
+    from PyQt6.QtGui import QFont, QPalette, QColor, QPixmap, QImage, QPainter, QPen
     print("Using PyQt6")
 except ImportError:
     from PySide6.QtWidgets import (
@@ -26,12 +26,34 @@ except ImportError:
         QRadioButton, QCheckBox
     )
     from PySide6.QtCore import Qt, QTimer, QSize, QRectF, QPointF
-    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QPainter, QPen
+    from PySide6.QtGui import QFont, QPalette, QColor, QPixmap, QImage, QPainter, QPen
     print("Using PySide6")
 
 from mqtt_client import MQTTClient
 from history_manager import HistoryManager
 from history_widget import HistoryWidget
+
+# Component Definition modules
+try:
+    from component_definition_widget import ComponentDefinitionWidget
+    from component_definition import ComponentDefinitionManager
+    from mvi_component_integration import MVIComponentIntegration
+    import cv2
+    import numpy as np
+    COMPONENT_DEF_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Component Definition not available: {e}")
+    COMPONENT_DEF_AVAILABLE = False
+
+# AI modules (optional - graceful degradation if not available)
+try:
+    from ai_agent import AIAgent
+    from document_rag import DocumentRAG
+    from database_agent import DatabaseAgent
+    AI_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ AI modules not available: {e}")
+    AI_AVAILABLE = False
 
 
 class AddTopicDialog(QDialog):
@@ -77,9 +99,100 @@ class MVITriggerGUI(QMainWindow):
         self.config = self.load_config()
         self.mqtt_client = None
         self.history_manager = HistoryManager()  # Initialize history manager
+
+        # Initialize Component Definition (if available)
+        self.comp_manager = None
+        self.mvi_integration = None
+        if COMPONENT_DEF_AVAILABLE:
+            try:
+                self.comp_manager = ComponentDefinitionManager()
+                self.mvi_integration = MVIComponentIntegration(self.comp_manager)
+                print("✓ Component Definition integration initialized")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize Component Definition: {e}")
+
+        # Initialize AI components (if available)
+        self.ai_agent = None
+        self.doc_rag = None
+        self.db_agent = None
+        self.intelligent_engine = None
+        if AI_AVAILABLE:
+            try:
+                self.ai_agent = AIAgent()
+                self.doc_rag = DocumentRAG(self.ai_agent, documents_folder="manuals")
+                # database_agent will be initialized after history_manager
+                print("✓ AI modules initialized")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize AI: {e}")
+
         self.init_ui()
         self.load_ui_state()  # Load saved UI state (mode and selections)
         self.init_mqtt()
+
+        # Initialize database agent after history_manager
+        if AI_AVAILABLE and self.ai_agent and hasattr(self.history_manager, 'db_path'):
+            try:
+                import sqlite3
+                db_connection = sqlite3.connect(self.history_manager.db_path)
+                self.db_agent = DatabaseAgent(self.ai_agent, db_connection)
+                print("✓ Database agent initialized")
+
+                # Initialize Intelligent Engine
+                # Check environment variable (default to V3)
+                import os
+                engine_version = os.environ.get('ENGINE_VERSION', '3')  # 1, 2, or 3
+
+                try:
+                    if engine_version == '3':
+                        # Try Level 3 engine (Vector Search + Self-Reflection + Long-term Memory)
+                        try:
+                            from intelligent_engine_v3 import IntelligentAIEngineV3
+                            self.intelligent_engine = IntelligentAIEngineV3(
+                                self.ai_agent,
+                                self.db_agent,
+                                self.doc_rag,
+                                mode='auto',
+                                enable_vector_search=True  # Requires sentence-transformers
+                            )
+                            print("✓ Intelligent AI Engine V3 initialized (Level 3)")
+                        except ImportError as e:
+                            # Fallback to V2
+                            print(f"⚠️ V3 not available ({e}), using V2")
+                            from intelligent_engine_v2 import IntelligentAIEngineV2
+                            self.intelligent_engine = IntelligentAIEngineV2(
+                                self.ai_agent,
+                                self.db_agent,
+                                self.doc_rag,
+                                mode='auto'
+                            )
+                            print("✓ Intelligent AI Engine V2 initialized (Level 2)")
+
+                    elif engine_version == '2':
+                        # Use Level 2 engine (ReAct + Context Memory + Multi-Agent)
+                        from intelligent_engine_v2 import IntelligentAIEngineV2
+                        self.intelligent_engine = IntelligentAIEngineV2(
+                            self.ai_agent,
+                            self.db_agent,
+                            self.doc_rag,
+                            mode='auto'
+                        )
+                        print("✓ Intelligent AI Engine V2 initialized (Level 2)")
+
+                    else:  # engine_version == '1'
+                        # Use Level 1 engine (Query Understanding + Chain-of-Thought)
+                        from intelligent_engine import IntelligentAIEngine
+                        self.intelligent_engine = IntelligentAIEngine(
+                            self.ai_agent,
+                            self.db_agent,
+                            self.doc_rag
+                        )
+                        print("✓ Intelligent AI Engine initialized (Level 1)")
+
+                except Exception as e:
+                    print(f"⚠️ Intelligent Engine not available: {e}")
+
+            except Exception as e:
+                print(f"⚠️ Failed to initialize database agent: {e}")
 
     def load_config(self):
         """Load configuration from JSON file"""
@@ -194,6 +307,17 @@ class MVITriggerGUI(QMainWindow):
         # Create History tab
         self.history_widget = HistoryWidget()
         self.tabs.addTab(self.history_widget, "📋 History")
+
+        # Create Component Definition tab (if available)
+        if COMPONENT_DEF_AVAILABLE:
+            self.component_def_widget = ComponentDefinitionWidget()
+            self.tabs.addTab(self.component_def_widget, "📋 Component Definition")
+
+        # Create AI Assistant tab (if available)
+        if AI_AVAILABLE and self.ai_agent:
+            self.ai_widget = QWidget()
+            self.init_ai_tab()
+            self.tabs.addTab(self.ai_widget, "🤖 AI Assistant")
 
         main_layout.addWidget(self.tabs)
 
@@ -364,6 +488,33 @@ class MVITriggerGUI(QMainWindow):
         topic_group.setLayout(topic_main_layout)
         live_layout.addWidget(topic_group)
 
+        # ========== Component Definition Product Selection ==========
+        if COMPONENT_DEF_AVAILABLE and self.comp_manager:
+            product_group = QGroupBox("🎯 Component Definition (ตรวจสอบวัตถุที่หายไป)")
+            product_layout = QHBoxLayout()
+
+            self.enable_component_check = QCheckBox("Enable Component Check")
+            self.enable_component_check.setToolTip("เปิดใช้งานการตรวจสอบ Component ที่หายไป (วาดกรอบสีแดง)")
+            self.enable_component_check.stateChanged.connect(self.on_component_check_changed)
+            product_layout.addWidget(self.enable_component_check)
+
+            product_layout.addWidget(QLabel("Product:"))
+
+            self.product_combo = QComboBox()
+            self.product_combo.setMinimumHeight(35)
+            self.product_combo.setToolTip("เลือก Product ที่ต้องการตรวจสอบ Component")
+            self.update_product_list()
+            product_layout.addWidget(self.product_combo, 1)
+
+            refresh_product_btn = QPushButton("🔄")
+            refresh_product_btn.setMaximumWidth(40)
+            refresh_product_btn.setToolTip("รีเฟรชรายการ Product")
+            refresh_product_btn.clicked.connect(self.update_product_list)
+            product_layout.addWidget(refresh_product_btn)
+
+            product_group.setLayout(product_layout)
+            live_layout.addWidget(product_group)
+
         # ========== Dual Camera Display (Side by Side) ==========
         cameras_layout = QHBoxLayout()
 
@@ -525,6 +676,27 @@ class MVITriggerGUI(QMainWindow):
         """Update topic combo box with current topics"""
         self.topic_combo.clear()
         self.topic_combo.addItems(self.config.get("topics", []))
+
+    def update_product_list(self):
+        """Update product combo box with available products"""
+        if not (COMPONENT_DEF_AVAILABLE and self.comp_manager):
+            return
+
+        if hasattr(self, 'product_combo'):
+            self.product_combo.clear()
+            self.product_combo.addItem("-- Select Product --", None)
+
+            products = self.comp_manager.list_products()
+            for product in products:
+                self.product_combo.addItem(
+                    f"{product['name']} ({product['component_count']} components)",
+                    product['id']
+                )
+
+    def on_component_check_changed(self, state):
+        """Handle component check enable/disable"""
+        if hasattr(self, 'product_combo'):
+            self.product_combo.setEnabled(state == Qt.CheckState.Checked.value)
 
     def update_checkbox_list(self):
         """Update checkbox list with current topics"""
@@ -1213,10 +1385,87 @@ class MVITriggerGUI(QMainWindow):
                 pixmap = QPixmap(image_path)
 
                 if not pixmap.isNull():
-                    # Draw bounding boxes if detected objects exist
+                    # Check if Component Definition is enabled and product is selected
+                    use_component_def = False
+                    product_id = None
+
+                    if (COMPONENT_DEF_AVAILABLE and
+                        hasattr(self, 'enable_component_check') and
+                        self.enable_component_check.isChecked() and
+                        hasattr(self, 'product_combo')):
+                        product_id = self.product_combo.currentData()
+                        if product_id:
+                            use_component_def = True
+
+                    # Draw bounding boxes with Component Definition if enabled
                     if detected_objects and isinstance(detected_objects, list) and len(detected_objects) > 0:
-                        pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
-                        print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
+                        if use_component_def and self.mvi_integration:
+                            # Use Component Definition Integration
+                            print(f"🎯 Using Component Definition for product ID: {product_id}")
+
+                            # Convert QPixmap to numpy array for OpenCV processing
+                            qimage = pixmap.toImage()
+                            width = qimage.width()
+                            height = qimage.height()
+                            ptr = qimage.bits()
+                            ptr.setsize(height * width * 4)
+                            arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
+                            # Convert RGBA to BGR for OpenCV
+                            cv_image = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+                            # Convert MVI detected_objects to expected format
+                            mvi_detections = []
+                            print(f"\n  📦 Converting {len(detected_objects)} detected objects:")
+                            for obj in detected_objects:
+                                rectangle = obj.get("rectangle", {})
+                                min_point = rectangle.get("min", {})
+                                max_point = rectangle.get("max", {})
+
+                                x1 = min_point.get("x", 0)
+                                y1 = min_point.get("y", 0)
+                                x2 = max_point.get("x", 0)
+                                y2 = max_point.get("y", 0)
+
+                                detection = {
+                                    "class": obj.get("label", "Unknown"),
+                                    "confidence": obj.get("score", 0.0),
+                                    "bbox": {
+                                        "x": x1,
+                                        "y": y1,
+                                        "width": x2 - x1,
+                                        "height": y2 - y1
+                                    }
+                                }
+                                mvi_detections.append(detection)
+                                print(f"    - {detection['class']} (conf: {detection['confidence']:.2f}, "
+                                      f"pos: {detection['bbox']['x']},{detection['bbox']['y']}, "
+                                      f"size: {detection['bbox']['width']}x{detection['bbox']['height']})")
+
+                            # Process with Component Definition
+                            result = self.mvi_integration.process_mvi_result(
+                                cv_image,
+                                mvi_detections,
+                                product_id
+                            )
+
+                            # Convert annotated image back to QPixmap
+                            annotated_image = result["annotated_image"]
+                            height, width, channel = annotated_image.shape
+                            bytes_per_line = 3 * width
+                            rgb_image = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
+                            qimage = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                            pixmap = QPixmap.fromImage(qimage)
+
+                            print(f"✓ Component Definition: Status={result['status']}")
+                            if result['missing_positions']:
+                                print(f"  ❌ Missing: {', '.join(result['missing_positions'])}")
+                            else:
+                                print(f"  ✅ All components found")
+
+                        else:
+                            # Use standard bounding box drawing
+                            pixmap = self.draw_bounding_boxes(pixmap, detected_objects)
+                            print(f"✓ วาด bounding boxes: {len(detected_objects)} วัตถุ")
 
                     # Save pixmap for history
                     image_pixmap_for_history = pixmap
@@ -1451,6 +1700,270 @@ class MVITriggerGUI(QMainWindow):
         if self.mqtt_client:
             self.mqtt_client.disconnect()
         event.accept()
+
+    def init_ai_tab(self):
+        """Initialize AI Assistant tab"""
+        layout = QVBoxLayout(self.ai_widget)
+
+        # Title
+        title = QLabel("🤖 AI Assistant (Powered by Ollama)")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+
+        # Status section
+        status_section = QGroupBox("📊 AI Status")
+        status_layout = QVBoxLayout()
+
+        # Connection status
+        if self.ai_agent and self.ai_agent.is_available():
+            status_label = QLabel("✅ Ollama Connected")
+            status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            status_label = QLabel("❌ Ollama Not Available")
+            status_label.setStyleSheet("color: red; font-weight: bold;")
+        status_layout.addWidget(status_label)
+
+        # Model selector
+        model_selector_layout = QHBoxLayout()
+        model_selector_layout.addWidget(QLabel("Current Model:"))
+
+        try:
+            from PyQt6.QtWidgets import QComboBox
+            self.model_combo = QComboBox()
+        except ImportError:
+            from PySide6.QtWidgets import QComboBox
+            self.model_combo = QComboBox()
+
+        if self.ai_agent:
+            for model in self.ai_agent.available_models:
+                family_icon = {"text": "💬", "vision": "👁️", "code": "💻"}.get(model["family"], "🤖")
+                self.model_combo.addItem(f"{family_icon} {model['name']}", model["name"])
+
+            # Set current model
+            for i in range(self.model_combo.count()):
+                if self.model_combo.itemData(i) == self.ai_agent.current_model:
+                    self.model_combo.setCurrentIndex(i)
+                    break
+
+            self.model_combo.currentIndexChanged.connect(self.on_ai_model_changed)
+
+        model_selector_layout.addWidget(self.model_combo)
+
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setMaximumWidth(40)
+        refresh_btn.setToolTip("Refresh models")
+        refresh_btn.clicked.connect(self.refresh_ai_models)
+        model_selector_layout.addWidget(refresh_btn)
+
+        status_layout.addLayout(model_selector_layout)
+
+        # Document count
+        if self.doc_rag:
+            doc_count_label = QLabel(f"📚 Documents: {self.doc_rag.get_document_count()} files")
+            status_layout.addWidget(doc_count_label)
+
+        status_section.setLayout(status_layout)
+        layout.addWidget(status_section)
+
+        # Chat display
+        chat_label = QLabel("💬 Chat")
+        chat_label.setStyleSheet("font-size: 14px; font-weight: bold; padding-top: 10px;")
+        layout.addWidget(chat_label)
+
+        try:
+            from PyQt6.QtWidgets import QTextEdit
+            self.chat_display = QTextEdit()
+        except ImportError:
+            from PySide6.QtWidgets import QTextEdit
+            self.chat_display = QTextEdit()
+
+        self.chat_display.setReadOnly(True)
+        self.chat_display.setStyleSheet("""
+            QTextEdit {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 5px;
+                padding: 10px;
+                font-size: 13px;
+            }
+        """)
+        self.chat_display.setHtml("<i>พร้อมใช้งาน! พิมพ์คำถามหรือคำสั่งด้านล่าง</i>")
+        layout.addWidget(self.chat_display)
+
+        # Input area
+        input_layout = QHBoxLayout()
+
+        try:
+            from PyQt6.QtWidgets import QLineEdit
+            self.chat_input = QLineEdit()
+        except ImportError:
+            from PySide6.QtWidgets import QLineEdit
+            self.chat_input = QLineEdit()
+
+        self.chat_input.setPlaceholderText("พิมพ์คำถามหรือคำสั่ง... (Enter เพื่อส่ง)")
+        self.chat_input.setStyleSheet("padding: 8px; font-size: 13px;")
+        self.chat_input.returnPressed.connect(self.send_ai_message)
+        input_layout.addWidget(self.chat_input)
+
+        send_btn = QPushButton("📤 ส่ง")
+        send_btn.clicked.connect(self.send_ai_message)
+        input_layout.addWidget(send_btn)
+
+        layout.addLayout(input_layout)
+
+        # Quick action buttons
+        actions_label = QLabel("⚡ Quick Actions")
+        actions_label.setStyleSheet("font-size: 12px; font-weight: bold; padding-top: 5px;")
+        layout.addWidget(actions_label)
+
+        actions_layout = QHBoxLayout()
+
+        btn_analyze = QPushButton("📊 วิเคราะห์วันนี้")
+        btn_analyze.setToolTip("วิเคราะห์ผลการตรวจสอบวันนี้")
+        btn_analyze.clicked.connect(lambda: self.ai_quick_action("analyze_today"))
+        actions_layout.addWidget(btn_analyze)
+
+        btn_defects = QPushButton("🔍 Top Defects")
+        btn_defects.setToolTip("แสดง defects ที่พบบ่อยที่สุด")
+        btn_defects.clicked.connect(lambda: self.ai_quick_action("top_defects"))
+        actions_layout.addWidget(btn_defects)
+
+        btn_docs = QPushButton("📚 เอกสาร")
+        btn_docs.setToolTip("รายการเอกสารที่โหลดไว้")
+        btn_docs.clicked.connect(lambda: self.ai_quick_action("list_docs"))
+        actions_layout.addWidget(btn_docs)
+
+        btn_clear = QPushButton("🗑️ Clear")
+        btn_clear.setToolTip("ล้างประวัติการสนทนา")
+        btn_clear.clicked.connect(self.ai_clear_chat)
+        actions_layout.addWidget(btn_clear)
+
+        layout.addLayout(actions_layout)
+
+    def on_ai_model_changed(self, index):
+        """Handle AI model selection change"""
+        if not self.ai_agent:
+            return
+
+        model_name = self.model_combo.itemData(index)
+        if model_name and model_name != self.ai_agent.current_model:
+            success = self.ai_agent.set_model(model_name)
+            if success:
+                self.chat_display.append(f"<hr><i>✓ เปลี่ยนเป็น model: {model_name}</i><br>")
+                self.statusBar.showMessage(f"เปลี่ยนเป็น AI model: {model_name}", 3000)
+
+    def refresh_ai_models(self):
+        """Refresh AI model list"""
+        if not self.ai_agent:
+            return
+
+        self.ai_agent.refresh_available_models()
+        self.model_combo.clear()
+
+        for model in self.ai_agent.available_models:
+            family_icon = {"text": "💬", "vision": "👁️", "code": "💻"}.get(model["family"], "🤖")
+            self.model_combo.addItem(f"{family_icon} {model['name']}", model["name"])
+
+        self.statusBar.showMessage("อัพเดทรายการ AI models แล้ว", 3000)
+
+    def send_ai_message(self):
+        """Send message to AI"""
+        if not self.ai_agent:
+            self.chat_display.append("<b>❌ AI Agent ไม่พร้อมใช้งาน</b><br>")
+            return
+
+        user_msg = self.chat_input.text().strip()
+        if not user_msg:
+            return
+
+        # Display user message
+        self.chat_display.append(f"<b>👤 คุณ:</b> {user_msg}<br>")
+        self.chat_input.clear()
+
+        # Show thinking indicator
+        self.chat_display.append("<i>🤔 AI กำลังคิด...</i><br>")
+        self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+
+        # Process in background (simple approach - could use QThread for better UX)
+        try:
+            # Use Intelligent Engine if available (Level 1: Enhanced reasoning)
+            if self.intelligent_engine:
+                # Intelligent Engine handles query understanding, routing, and reasoning automatically
+                response = self.intelligent_engine.process_query(user_msg)
+            else:
+                # Fallback to basic routing
+                # Check if need database query
+                db_keywords = ["ตรวจสอบ", "inspection", "รายละเอียด", "detail", "เมื่อไหร่", "when", "กี่ครั้ง", "how many",
+                              "fail", "pass", "วันนี้", "today", "เครื่อง", "device", "ล่าสุด", "latest", "recent",
+                              "แสดง", "show", "list", "จำนวน", "count", "สถิติ", "stat", "วิเคราะห์", "analyze"]
+                use_db = any(keyword in user_msg.lower() for keyword in db_keywords)
+
+                # Check if need document search
+                doc_keywords = ["คู่มือ", "manual", "วิธี", "how", "ขั้นตอน", "อธิบาย", "เอกสาร", "document"]
+                use_rag = any(keyword in user_msg.lower() for keyword in doc_keywords)
+
+                if use_db and self.db_agent:
+                    # Use database agent for queries about inspections
+                    response = self.db_agent.query_database_nl(user_msg)
+                elif use_rag and self.doc_rag and self.doc_rag.get_document_count() > 0:
+                    # Use document RAG for manual/documentation questions
+                    response = self.doc_rag.ask_with_rag(user_msg)
+                else:
+                    # Normal chat with context
+                    context = self.get_ai_context()
+                    response = self.ai_agent.chat(user_msg, context)
+
+            # Remove thinking indicator
+            html = self.chat_display.toHtml()
+            html = html.replace("<i>🤔 AI กำลังคิด...</i><br>", "")
+            self.chat_display.setHtml(html)
+
+            # Add AI response
+            self.chat_display.append(f"<b>🤖 AI:</b><br>{response}<br><hr>")
+            self.chat_display.verticalScrollBar().setValue(self.chat_display.verticalScrollBar().maximum())
+
+        except Exception as e:
+            html = self.chat_display.toHtml()
+            html = html.replace("<i>🤔 AI กำลังคิด...</i><br>", "")
+            self.chat_display.setHtml(html)
+            self.chat_display.append(f"<b>❌ Error:</b> {str(e)}<br><hr>")
+
+    def get_ai_context(self):
+        """Get current context for AI"""
+        context = {}
+
+        # Get today's stats
+        if self.db_agent:
+            try:
+                stats = self.db_agent.get_statistics("today")
+                context["today_stats"] = stats
+            except:
+                pass
+
+        return context
+
+    def ai_quick_action(self, action):
+        """Handle quick action buttons"""
+        if action == "analyze_today":
+            self.chat_input.setText("วิเคราะห์ผลการตรวจสอบวันนี้")
+            self.send_ai_message()
+        elif action == "top_defects":
+            self.chat_input.setText("แสดง devices และผลการตรวจสอบ")
+            self.send_ai_message()
+        elif action == "list_docs":
+            if self.doc_rag:
+                doc_list = self.doc_rag.list_documents()
+                self.chat_display.append(f"<b>📚 เอกสารในระบบ:</b><br>{doc_list.replace(chr(10), '<br>')}<br><hr>")
+            else:
+                self.chat_display.append("<b>⚠️ Document RAG ไม่พร้อมใช้งาน</b><br><hr>")
+
+    def ai_clear_chat(self):
+        """Clear chat history"""
+        if self.ai_agent:
+            self.ai_agent.clear_history()
+        self.chat_display.clear()
+        self.chat_display.setHtml("<i>✓ ล้างประวัติการสนทนาแล้ว</i>")
+        self.statusBar.showMessage("ล้างประวัติการสนทนา AI แล้ว", 3000)
 
 
 class FullscreenImageDialog(QDialog):
