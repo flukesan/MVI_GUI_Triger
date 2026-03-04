@@ -20,6 +20,56 @@ except ImportError:
 class GigEBackend(BaseCameraBackend):
     """Camera backend สำหรับ GigE Vision cameras (Harvesters/GenICam)"""
 
+    # ─── Shared Harvester (singleton per GenTL path) ───
+    # ป้องกันปัญหา: GenTL producer โหลดซ้ำไม่ได้ในโปรเซสเดียวกัน
+    # ทำให้กล้องตัวที่ 2 เชื่อมต่อไม่ได้เพราะ device_info_list ว่าง
+    _shared_harvesters: Dict[str, Any] = {}      # gentl_path -> Harvester
+    _harvester_ref_counts: Dict[str, int] = {}   # gentl_path -> ref count
+    _harvester_lock = threading.Lock()
+
+    @classmethod
+    def _get_shared_harvester(cls, gentl_path: str) -> Any:
+        """
+        Get or create a shared Harvester for the given GenTL path.
+        Ref-counted: จะถูก reset เมื่อทุกกล้องที่ใช้ path นี้ disconnect แล้ว
+        """
+        with cls._harvester_lock:
+            if gentl_path not in cls._shared_harvesters:
+                print(f"  สร้าง Harvester ใหม่สำหรับ: {gentl_path}")
+                h = Harvester()
+                h.add_file(gentl_path)
+                h.update()
+                time.sleep(0.5)
+
+                # Retry discovery if empty
+                if len(h.device_info_list) == 0:
+                    print("  รอให้ device discovery เสร็จ...")
+                    time.sleep(1.0)
+                    h.update()
+
+                cls._shared_harvesters[gentl_path] = h
+                cls._harvester_ref_counts[gentl_path] = 0
+
+            cls._harvester_ref_counts[gentl_path] += 1
+            return cls._shared_harvesters[gentl_path]
+
+    @classmethod
+    def _release_shared_harvester(cls, gentl_path: str):
+        """Release ref to shared Harvester. Reset เมื่อ ref count = 0"""
+        with cls._harvester_lock:
+            if gentl_path not in cls._harvester_ref_counts:
+                return
+            cls._harvester_ref_counts[gentl_path] -= 1
+            if cls._harvester_ref_counts[gentl_path] <= 0:
+                print(f"  ปิด shared Harvester: {gentl_path}")
+                h = cls._shared_harvesters.pop(gentl_path, None)
+                cls._harvester_ref_counts.pop(gentl_path, None)
+                if h is not None:
+                    try:
+                        h.reset()
+                    except Exception:
+                        pass
+
     def __init__(self):
         super().__init__()
 
@@ -33,6 +83,7 @@ class GigEBackend(BaseCameraBackend):
         self.fps = 0
         self.last_fps_time = time.time()
         self.fps_frame_count = 0
+        self._gentl_path = None  # Track path for cleanup
 
         if not HARVESTERS_AVAILABLE:
             raise RuntimeError(
@@ -76,19 +127,15 @@ class GigEBackend(BaseCameraBackend):
             print(f"  GenTL Producer: {gentl_path}")
             print(f"  Camera ID: {camera_id}")
 
-            self.harvester = Harvester()
-            self.harvester.add_file(gentl_path)
-            self.harvester.update()
-
-            time.sleep(0.5)
-
-            if len(self.harvester.device_info_list) == 0:
-                print("  รอให้ device discovery เสร็จ...")
-                time.sleep(1.0)
-                self.harvester.update()
+            # ใช้ shared Harvester — ป้องกัน GenTL ซ้ำซ้อน
+            self._gentl_path = gentl_path
+            self.harvester = self._get_shared_harvester(gentl_path)
 
             if len(self.harvester.device_info_list) == 0:
                 print("ไม่พบกล้อง GigE Vision")
+                self._release_shared_harvester(gentl_path)
+                self.harvester = None
+                self._gentl_path = None
                 return False
 
             print(f"พบกล้อง {len(self.harvester.device_info_list)} ตัว:")
@@ -96,27 +143,37 @@ class GigEBackend(BaseCameraBackend):
                 print(f"  [{idx}] {device_info}")
 
             # Create image acquirer
+            actual_device_index = None
+
             if isinstance(camera_id, int):
                 if camera_id >= len(self.harvester.device_info_list):
-                    print(f"Camera index {camera_id} ไม่ถูกต้อง")
+                    print(f"Camera index {camera_id} ไม่ถูกต้อง "
+                          f"(มีกล้อง {len(self.harvester.device_info_list)} ตัว)")
+                    self._release_shared_harvester(gentl_path)
+                    self.harvester = None
+                    self._gentl_path = None
                     return False
-                self.image_acquirer = self.harvester.create(camera_id)
+                actual_device_index = camera_id
             else:
+                # Match by serial_number, user_defined_name, display_name, or id_
                 camera_id_str = str(camera_id)
-                matched_index = None
                 for idx, dev in enumerate(self.harvester.device_info_list):
                     if (str(getattr(dev, 'serial_number', '')) == camera_id_str or
                         str(getattr(dev, 'user_defined_name', '')) == camera_id_str or
                         str(getattr(dev, 'display_name', '')) == camera_id_str or
                         str(getattr(dev, 'id_', '')) == camera_id_str):
-                        matched_index = idx
+                        actual_device_index = idx
                         break
 
-                if matched_index is None:
+                if actual_device_index is None:
                     print(f"ไม่พบกล้องที่ตรงกับ '{camera_id_str}'")
+                    self._release_shared_harvester(gentl_path)
+                    self.harvester = None
+                    self._gentl_path = None
                     return False
 
-                self.image_acquirer = self.harvester.create(matched_index)
+            print(f"  กำลังเปิดกล้อง index {actual_device_index}...")
+            self.image_acquirer = self.harvester.create(actual_device_index)
 
             # Configure camera parameters
             try:
@@ -172,11 +229,13 @@ class GigEBackend(BaseCameraBackend):
             actual_width = self.image_acquirer.remote_device.node_map.Width.value
             actual_height = self.image_acquirer.remote_device.node_map.Height.value
 
-            device_info = self.harvester.device_info_list[camera_id if isinstance(camera_id, int) else 0]
+            # ใช้ actual_device_index เพื่อดึงข้อมูลกล้องที่ถูกต้อง
+            device_info = self.harvester.device_info_list[actual_device_index]
 
             self.camera_info = {
                 'backend': 'GigE Vision',
                 'source': str(camera_id),
+                'device_index': actual_device_index,
                 'vendor': getattr(device_info, 'vendor', 'Unknown'),
                 'model': getattr(device_info, 'model', 'Unknown'),
                 'serial_number': getattr(device_info, 'serial_number', 'Unknown'),
@@ -187,6 +246,7 @@ class GigEBackend(BaseCameraBackend):
 
             print(f"เชื่อมต่อกล้องสำเร็จ (GigE Vision)")
             print(f"  Model: {self.camera_info['vendor']} {self.camera_info['model']}")
+            print(f"  Serial: {self.camera_info['serial_number']}")
             print(f"  Resolution: {actual_width}x{actual_height}")
 
             self.image_acquirer.start()
@@ -202,6 +262,18 @@ class GigEBackend(BaseCameraBackend):
             print(f"Error connecting GigE camera: {e}")
             import traceback
             traceback.print_exc()
+            # Cleanup on failure
+            if self.image_acquirer is not None:
+                try:
+                    self.image_acquirer.stop()
+                    self.image_acquirer.destroy()
+                except Exception:
+                    pass
+                self.image_acquirer = None
+            if self._gentl_path is not None:
+                self._release_shared_harvester(self._gentl_path)
+                self.harvester = None
+                self._gentl_path = None
             return False
 
     def disconnect(self) -> None:
@@ -220,12 +292,11 @@ class GigEBackend(BaseCameraBackend):
                 pass
             self.image_acquirer = None
 
-        if self.harvester is not None:
-            try:
-                self.harvester.reset()
-            except Exception:
-                pass
+        # Release shared harvester (ไม่ reset ถ้ายังมีกล้องอื่นใช้อยู่)
+        if self._gentl_path is not None:
+            self._release_shared_harvester(self._gentl_path)
             self.harvester = None
+            self._gentl_path = None
 
         self.current_frame = None
 
