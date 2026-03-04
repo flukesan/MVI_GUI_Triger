@@ -381,8 +381,8 @@ class InspectionController(QObject):
         # Annotate frame for result/history
         annotated = self.detector.draw_detections(
             frame.copy(),
-            self._cached_detections,
-            self._cached_missing_parts
+            self._cached_detections.get(camera_id, []),
+            self._cached_missing_parts.get(camera_id)
         )
         result["annotated_image"] = annotated
 
