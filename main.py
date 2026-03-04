@@ -112,11 +112,15 @@ class InspectionGUI(QMainWindow):
 
     def save_ui_state(self):
         mode = "capture" if self.capture_radio.isChecked() else "realtime"
+        if self.anomaly_radio.isChecked():
+            mode = "anomaly"
         product_id = self.product_combo.currentData()
+        camera_mode = self.camera_mode_combo.currentData() or "single"
         self.config["ui_state"] = {
             "last_product_id": product_id,
             "cam1_zoom": self.cam1_zoom,
-            "cam2_zoom": self.cam2_zoom
+            "cam2_zoom": self.cam2_zoom,
+            "camera_mode": camera_mode
         }
         self.config["inspection"]["mode"] = mode
         self.save_config()
@@ -126,8 +130,16 @@ class InspectionGUI(QMainWindow):
         mode = self.config.get("inspection", {}).get("mode", "capture")
         if mode == "realtime":
             self.realtime_radio.setChecked(True)
+        elif mode == "anomaly":
+            self.anomaly_radio.setChecked(True)
         else:
             self.capture_radio.setChecked(True)
+
+        # Restore camera mode (Single/Multi)
+        camera_mode = ui.get("camera_mode", "single")
+        idx = self.camera_mode_combo.findData(camera_mode)
+        if idx >= 0:
+            self.camera_mode_combo.setCurrentIndex(idx)
 
         last_product = ui.get("last_product_id")
         if last_product:
@@ -363,6 +375,16 @@ class InspectionGUI(QMainWindow):
         mode_row.addWidget(self.realtime_radio)
         mode_row.addWidget(self.anomaly_radio)
         insp_layout.addLayout(mode_row)
+
+        # Camera Mode (Single / Multi)
+        cam_mode_row = QHBoxLayout()
+        cam_mode_row.addWidget(QLabel("Camera:"))
+        self.camera_mode_combo = QComboBox()
+        self.camera_mode_combo.addItem("Single (Cam 1)", "single")
+        self.camera_mode_combo.addItem("Multi (Cam 1+2)", "multi")
+        self.camera_mode_combo.currentIndexChanged.connect(self.on_camera_mode_changed)
+        cam_mode_row.addWidget(self.camera_mode_combo, 1)
+        insp_layout.addLayout(cam_mode_row)
 
         # Detect FPS slider (Realtime mode) — wrapped in widget for show/hide
         self.detect_fps_widget = QWidget()
@@ -1394,6 +1416,15 @@ class InspectionGUI(QMainWindow):
 
         self.save_ui_state()
 
+    def on_camera_mode_changed(self):
+        cam_mode = self.camera_mode_combo.currentData()
+        print(f"Camera mode: {cam_mode}")
+        self.save_ui_state()
+
+    def is_multi_camera(self) -> bool:
+        """ตรวจสอบว่าเลือกโหมด Multi camera หรือไม่"""
+        return self.camera_mode_combo.currentData() == "multi"
+
     def on_product_changed(self, index):
         product_id = self.product_combo.currentData()
         if product_id:
@@ -1431,10 +1462,18 @@ class InspectionGUI(QMainWindow):
         self.trigger_btn.setEnabled(False)
         QApplication.processEvents()
 
+        # Cam 1 (always)
         if is_anomaly:
             self.inspection_controller.trigger_anomaly(0)
         else:
             self.inspection_controller.trigger_capture(0)
+
+        # Cam 2 (Multi mode only)
+        if self.is_multi_camera() and self.camera_manager.is_opened(1):
+            if is_anomaly:
+                self.inspection_controller.trigger_anomaly(1)
+            else:
+                self.inspection_controller.trigger_capture(1)
 
         self.trigger_btn.setText("TRIGGER")
         self.trigger_btn.setEnabled(True)
@@ -1483,6 +1522,13 @@ class InspectionGUI(QMainWindow):
                 QMessageBox.warning(self, "Warning", "Please connect a camera first")
                 return
 
+            multi = self.is_multi_camera()
+            if multi and not self.camera_manager.is_opened(1):
+                QMessageBox.warning(self, "Warning",
+                    "Multi mode: Camera 2 not connected.\n"
+                    "กรุณาเชื่อมต่อกล้องตัวที่ 2 หรือเปลี่ยนเป็น Single mode")
+                return
+
             # Stop anomaly preview if running (avoid conflicts)
             if self._anomaly_preview_active:
                 self._anomaly_preview_stop()
@@ -1495,6 +1541,10 @@ class InspectionGUI(QMainWindow):
             self.trigger_btn.setEnabled(False)
 
             self.inspection_controller.start_realtime(0)
+
+            # Multi mode: start camera 2 stream too
+            if multi:
+                self.inspection_controller.start_realtime_cam2(1)
         else:
             # STOP
             self._realtime_running = False
@@ -1506,6 +1556,10 @@ class InspectionGUI(QMainWindow):
             self.fps_label.setText("")
 
             self.inspection_controller.stop_realtime(0)
+
+            # Multi mode: stop camera 2 stream too
+            if self.is_multi_camera():
+                self.inspection_controller.stop_realtime_cam2(1)
 
     # ═══════════════════════════════════════════
     #  RESULT DISPLAY

@@ -113,13 +113,16 @@ class InspectionController(QObject):
         self._frame_skip_counter = 0
         self._last_result: Optional[dict] = None
 
-        # Cached detection results for smooth overlay
-        self._cached_detections: List[dict] = []
-        self._cached_missing_parts: Optional[List[dict]] = None
+        # Cached detection results for smooth overlay (per camera)
+        self._cached_detections: Dict[int, List[dict]] = {}
+        self._cached_missing_parts: Dict[int, Optional[List[dict]]] = {}
 
         # Background detection worker
         self._detection_worker: Optional[DetectionWorker] = None
         self._detecting: bool = False  # True = detection is in progress
+
+        # Multi-camera state
+        self._streaming_cameras: set = set()  # camera_ids currently streaming
 
     # ─── Product / Expected Parts ───
 
@@ -145,8 +148,8 @@ class InspectionController(QObject):
     # ─── Mode Control ───
 
     def set_mode(self, mode: str):
-        """เปลี่ยนโหมด: "capture" หรือ "realtime" """
-        if mode not in ("capture", "realtime"):
+        """เปลี่ยนโหมด: "capture", "realtime", "anomaly" """
+        if mode not in ("capture", "realtime", "anomaly"):
             return
 
         if self.is_streaming:
@@ -251,8 +254,9 @@ class InspectionController(QObject):
         self._frame_count = 0
         self._fps_start_time = time.time()
         self._frame_skip_counter = 0
-        self._cached_detections = []
-        self._cached_missing_parts = None
+        self._cached_detections[camera_id] = []
+        self._cached_missing_parts[camera_id] = None
+        self._streaming_cameras.add(camera_id)
 
         # Create and start detection worker (background thread)
         self._detection_worker = DetectionWorker(self.detector)
@@ -272,6 +276,7 @@ class InspectionController(QObject):
 
     def stop_realtime(self, camera_id: int = 0):
         """หยุด realtime"""
+        self._streaming_cameras.discard(camera_id)
         self.is_streaming = False
 
         try:
@@ -286,21 +291,49 @@ class InspectionController(QObject):
 
         self.camera.stop_stream(camera_id)
         self._detecting = False
+        self._cached_detections.pop(camera_id, None)
+        self._cached_missing_parts.pop(camera_id, None)
         self.status_changed.emit("ready")
         print("Realtime stopped")
+
+    def start_realtime_cam2(self, camera_id: int = 1):
+        """เริ่ม stream + detect สำหรับกล้องตัวที่ 2 (Multi mode)"""
+        if not self.camera.is_opened(camera_id):
+            self.error_occurred.emit(f"Camera {camera_id} not opened")
+            return
+
+        self._cached_detections[camera_id] = []
+        self._cached_missing_parts[camera_id] = None
+        self._streaming_cameras.add(camera_id)
+
+        # Start camera 2 stream (ใช้ detection worker ร่วมกับ cam 0)
+        stream_fps = 30
+        self.camera.start_stream(camera_id, stream_fps)
+        print(f"Realtime cam2 started: camera={camera_id}")
+
+    def stop_realtime_cam2(self, camera_id: int = 1):
+        """หยุด stream กล้องตัวที่ 2"""
+        self._streaming_cameras.discard(camera_id)
+        self.camera.stop_stream(camera_id)
+        self._cached_detections.pop(camera_id, None)
+        self._cached_missing_parts.pop(camera_id, None)
+        print(f"Realtime cam2 stopped: camera={camera_id}")
 
     def _on_realtime_frame(self, camera_id: int, frame: np.ndarray):
         """เรียกทุกเฟรมจากกล้อง — แสดง preview ทุกเฟรม + overlay cached detection"""
         if not self.is_streaming:
             return
 
-        # ═══ แสดง live preview ทุกเฟรม พร้อม overlay ผล detection ล่าสุด ═══
-        if self._cached_detections or self._cached_missing_parts:
+        # Filter: only process frames from cameras we're streaming
+        if camera_id not in self._streaming_cameras:
+            return
+
+        # ═══ แสดง live preview ทุกเฟรม พร้อม overlay cached detection (per camera) ═══
+        cam_dets = self._cached_detections.get(camera_id, [])
+        cam_missing = self._cached_missing_parts.get(camera_id)
+        if cam_dets or cam_missing:
             display_frame = self.detector.draw_detections(
-                frame.copy(),
-                self._cached_detections,
-                self._cached_missing_parts
-            )
+                frame.copy(), cam_dets, cam_missing)
         else:
             display_frame = frame
         self.frame_display.emit(camera_id, display_frame)
@@ -341,9 +374,9 @@ class InspectionController(QObject):
 
         result = self._compare_with_expected(detection, camera_id, frame)
 
-        # ═══ Cache detection results สำหรับ overlay บนเฟรมถัดไป ═══
-        self._cached_detections = detection.get("detections", [])
-        self._cached_missing_parts = result.get("missing_parts_detail")
+        # ═══ Cache detection results per camera สำหรับ overlay บนเฟรมถัดไป ═══
+        self._cached_detections[camera_id] = detection.get("detections", [])
+        self._cached_missing_parts[camera_id] = result.get("missing_parts_detail")
 
         # Annotate frame for result/history
         annotated = self.detector.draw_detections(
