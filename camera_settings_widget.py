@@ -152,7 +152,20 @@ class CameraProfilesDialog(QDialog):
         self.usb_index_spin.setValue(0)
         self.usb_index_spin.valueChanged.connect(self.on_profile_modified)
         usb_source_layout.addWidget(self.usb_index_spin)
+
+        self.usb_scan_btn = QPushButton("Scan")
+        self.usb_scan_btn.setToolTip("สแกนหากล้อง USB ที่เชื่อมต่ออยู่")
+        self.usb_scan_btn.setFixedWidth(60)
+        self.usb_scan_btn.clicked.connect(self.on_scan_usb_cameras)
+        usb_source_layout.addWidget(self.usb_scan_btn)
+
         usb_layout.addLayout(usb_source_layout)
+
+        self.usb_scan_result = QLabel("")
+        self.usb_scan_result.setWordWrap(True)
+        self.usb_scan_result.setStyleSheet("color: #888; font-size: 10px;")
+        usb_layout.addWidget(self.usb_scan_result)
+
         self.usb_group.setLayout(usb_layout)
         right_layout.addWidget(self.usb_group)
 
@@ -357,6 +370,23 @@ class CameraProfilesDialog(QDialog):
         self.gain_spin.setValue(data.get("gain", 0))
 
         self.save_profile_btn.setEnabled(False)
+
+    def on_scan_usb_cameras(self):
+        """Scan for available USB cameras"""
+        self.usb_scan_result.setText("Scanning...")
+        try:
+            from camera_manager import CameraManager
+            cameras = CameraManager.list_available_cameras()
+            if cameras:
+                lines = []
+                for cam in cameras:
+                    lines.append(f"  index {cam['index']}: {cam['name']}")
+                self.usb_scan_result.setText(
+                    f"พบกล้อง {len(cameras)} ตัว:\n" + "\n".join(lines))
+            else:
+                self.usb_scan_result.setText("ไม่พบกล้อง USB")
+        except Exception as e:
+            self.usb_scan_result.setText(f"Scan error: {e}")
 
     def on_type_changed(self, camera_type):
         self.usb_group.setVisible(camera_type == "USB Camera")

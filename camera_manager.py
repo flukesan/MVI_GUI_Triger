@@ -101,6 +101,11 @@ class CameraManager(QObject):
 
             success = backend.connect(source, width, height, fps, **kwargs)
             if not success:
+                # Ensure full cleanup of backend when connection fails
+                try:
+                    backend.disconnect()
+                except Exception:
+                    pass
                 self.camera_error.emit(camera_id, f"Cannot connect to camera: {source}")
                 return False
 
@@ -117,6 +122,7 @@ class CameraManager(QObject):
 
         except Exception as e:
             self.camera_error.emit(camera_id, str(e))
+            print(f"Camera {camera_id} open error: {e}")
             return False
 
     def _create_backend(self, camera_type: str) -> Optional[BaseCameraBackend]:
@@ -267,12 +273,49 @@ class CameraManager(QObject):
         return None
 
     @staticmethod
-    def list_available_cameras(max_check: int = 5) -> List[int]:
-        """สแกนหากล้อง USB ที่เชื่อมต่ออยู่"""
+    def list_available_cameras(max_check: int = 10) -> List[dict]:
+        """
+        สแกนหากล้อง USB ที่เชื่อมต่ออยู่
+
+        Returns:
+            List of dicts: [{"index": 0, "name": "...", "width": ..., "height": ...}, ...]
+        """
+        import os
         available = []
-        for i in range(max_check):
+
+        # Linux: check /dev/video* devices to find real camera indices
+        real_indices = set()
+        if os.path.exists("/dev"):
+            for dev in sorted(os.listdir("/dev")):
+                if dev.startswith("video"):
+                    try:
+                        idx = int(dev.replace("video", ""))
+                        real_indices.add(idx)
+                    except ValueError:
+                        pass
+
+        # Try both real indices and sequential scan
+        indices_to_check = sorted(real_indices | set(range(max_check)))
+
+        for i in indices_to_check:
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                available.append(i)
+                # Read a test frame to verify it's a real camera
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    backend_name = cap.getBackendName() if hasattr(cap, 'getBackendName') else "unknown"
+                    available.append({
+                        "index": i,
+                        "name": f"USB Camera {i} ({w}x{h})",
+                        "width": w,
+                        "height": h,
+                        "backend": backend_name,
+                    })
+                    print(f"  Found camera: index={i}, {w}x{h}, backend={backend_name}")
                 cap.release()
+
+        print(f"Available cameras: {len(available)} found "
+              f"(checked indices: {indices_to_check})")
         return available

@@ -48,6 +48,9 @@ class OpenCVBackend(BaseCameraBackend):
 
             if not self.cap.isOpened():
                 print(f"ไม่สามารถเชื่อมต่อกล้อง: {source}")
+                # Release device reference to avoid blocking the device
+                self.cap.release()
+                self.cap = None
                 return False
 
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -60,6 +63,14 @@ class OpenCVBackend(BaseCameraBackend):
                 self.cap.set(cv2.CAP_PROP_GAIN, kwargs['gain'])
             if 'buffer_size' in kwargs:
                 self.cap.set(cv2.CAP_PROP_BUFFERSIZE, kwargs['buffer_size'])
+
+            # Verify connection by reading a test frame
+            ret, test_frame = self.cap.read()
+            if not ret or test_frame is None:
+                print(f"กล้องเปิดได้แต่อ่านเฟรมไม่ได้: {source}")
+                self.cap.release()
+                self.cap = None
+                return False
 
             actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -85,6 +96,13 @@ class OpenCVBackend(BaseCameraBackend):
 
         except Exception as e:
             print(f"Error connecting camera (OpenCV): {e}")
+            # Cleanup on exception
+            if self.cap is not None:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
             return False
 
     def disconnect(self) -> None:

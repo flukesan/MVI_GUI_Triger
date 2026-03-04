@@ -1178,26 +1178,64 @@ class InspectionGUI(QMainWindow):
                 "Use 'Camera Profiles...' to add profiles.")
             return
 
+        # Check for same source conflict
+        if has_cam1 and has_cam2:
+            profile1 = self._get_profile_by_name(cam1_name)
+            profile2 = self._get_profile_by_name(cam2_name)
+            if (profile1 and profile2
+                    and profile1.get("source") == profile2.get("source")
+                    and profile1.get("type") == profile2.get("type")):
+                QMessageBox.warning(self, "Source Conflict",
+                    f"Cam 1 and Cam 2 ใช้ source เดียวกัน "
+                    f"({profile1.get('type')} : {profile1.get('source')})\n"
+                    f"กรุณาเลือก camera source ที่ต่างกัน\n\n"
+                    f"Tip: ไปที่ 'Camera Profiles...' เพื่อสร้าง profile "
+                    f"สำหรับกล้องตัวที่ 2 (source index ต่างกัน)")
+                return
+
+        errors = []
         connected = False
+
         if has_cam1:
             profile = self._get_profile_by_name(cam1_name)
             if profile:
                 self.status_bar.showMessage(f"Connecting Cam 1: {cam1_name}...")
+                QApplication.processEvents()
                 if self.camera_manager.connect_from_profile(0, profile):
                     connected = True
+                    print(f"Cam 1 connected: {cam1_name} (source={profile.get('source')})")
                 else:
-                    self.status_bar.showMessage(f"Failed to connect Cam 1: {cam1_name}")
+                    errors.append(f"Cam 1: {cam1_name} (source={profile.get('source')})")
+
+        # Delay between camera connections to avoid USB bus contention
+        if has_cam1 and has_cam2:
+            import time
+            time.sleep(0.5)
+            QApplication.processEvents()
 
         if has_cam2:
             profile = self._get_profile_by_name(cam2_name)
             if profile:
                 self.status_bar.showMessage(f"Connecting Cam 2: {cam2_name}...")
+                QApplication.processEvents()
                 if self.camera_manager.connect_from_profile(1, profile):
                     connected = True
+                    print(f"Cam 2 connected: {cam2_name} (source={profile.get('source')})")
                 else:
-                    self.status_bar.showMessage(f"Failed to connect Cam 2: {cam2_name}")
+                    errors.append(f"Cam 2: {cam2_name} (source={profile.get('source')})")
 
-        if not connected:
+        if errors:
+            error_msg = "เชื่อมต่อไม่สำเร็จ:\n" + "\n".join(errors)
+            error_msg += "\n\nสาเหตุที่เป็นไปได้:\n"
+            error_msg += "• กล้องถูกใช้งานโดยโปรแกรมอื่น\n"
+            error_msg += "• Source index ไม่ตรงกับกล้องจริง\n"
+            error_msg += "• Linux: /dev/video0 กับ /dev/video1 อาจเป็นกล้องตัวเดียวกัน\n"
+            error_msg += "\nลองตรวจสอบ: Camera Profiles... → ตั้ง source ให้ตรง"
+            if connected:
+                self.status_bar.showMessage(
+                    f"Connected partially — {', '.join(errors)} failed")
+            QMessageBox.warning(self, "Connection Error", error_msg)
+        elif not connected:
             self.status_bar.showMessage("Failed to connect cameras")
 
     def on_disconnect_camera(self):
