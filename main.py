@@ -114,10 +114,10 @@ class InspectionGUI(QMainWindow):
         mode = "capture" if self.capture_radio.isChecked() else "realtime"
         if self.anomaly_radio.isChecked():
             mode = "anomaly"
-        product_id = self.product_combo.currentData()
         camera_mode = self.camera_mode_combo.currentData() or "single"
         self.config["ui_state"] = {
-            "last_product_id": product_id,
+            "last_product_id_cam1": self.product_combo_cam1.currentData(),
+            "last_product_id_cam2": self.product_combo_cam2.currentData(),
             "cam1_zoom": self.cam1_zoom,
             "cam2_zoom": self.cam2_zoom,
             "camera_mode": camera_mode
@@ -141,12 +141,19 @@ class InspectionGUI(QMainWindow):
         if idx >= 0:
             self.camera_mode_combo.setCurrentIndex(idx)
 
-        last_product = ui.get("last_product_id")
-        if last_product:
-            for i in range(self.product_combo.count()):
-                if self.product_combo.itemData(i) == last_product:
-                    self.product_combo.setCurrentIndex(i)
-                    break
+        # Restore per-camera product selections
+        for attr, key in [('product_combo_cam1', 'last_product_id_cam1'),
+                          ('product_combo_cam2', 'last_product_id_cam2')]:
+            combo = getattr(self, attr, None)
+            if combo is None:
+                continue
+            # Backward compat: old config had 'last_product_id' (no cam suffix)
+            pid = ui.get(key) or (ui.get('last_product_id') if 'cam1' in attr else None)
+            if pid:
+                for i in range(combo.count()):
+                    if combo.itemData(i) == pid:
+                        combo.setCurrentIndex(i)
+                        break
 
     def apply_config_settings(self):
         model_cfg = self.config.get("model", {})
@@ -422,24 +429,48 @@ class InspectionGUI(QMainWindow):
         self.anomaly_status_label.setWordWrap(True)
         insp_layout.addWidget(self.anomaly_status_label)
 
-        # Product
-        product_row = QHBoxLayout()
-        product_row.addWidget(QLabel("Product:"))
-        self.product_combo = QComboBox()
-        self.product_combo.addItem("-- No Product --", None)
-        self.load_product_list()
-        self.product_combo.currentIndexChanged.connect(self.on_product_changed)
-        product_row.addWidget(self.product_combo, 1)
+        # Product — Camera 1
+        cam1_product_row = QHBoxLayout()
+        cam1_product_row.addWidget(QLabel("Cam1 Product:"))
+        self.product_combo_cam1 = QComboBox()
+        self.product_combo_cam1.setMinimumHeight(35)
+        self.product_combo_cam1.setToolTip("เลือก Product สำหรับ Camera 1")
+        self.product_combo_cam1.addItem("-- No Product --", None)
+        self.product_combo_cam1.currentIndexChanged.connect(
+            lambda idx: self.on_product_changed(idx, camera_id=0))
+        cam1_product_row.addWidget(self.product_combo_cam1, 1)
+        insp_layout.addLayout(cam1_product_row)
 
-        self.refresh_products_btn = QPushButton("Refresh")
-        self.refresh_products_btn.setMaximumWidth(60)
+        self.expected_label_cam1 = QLabel("Expected (Cam1): -")
+        self.expected_label_cam1.setStyleSheet("color: #495057; font-size: 11px;")
+        insp_layout.addWidget(self.expected_label_cam1)
+
+        # Product — Camera 2
+        cam2_product_row = QHBoxLayout()
+        cam2_product_row.addWidget(QLabel("Cam2 Product:"))
+        self.product_combo_cam2 = QComboBox()
+        self.product_combo_cam2.setMinimumHeight(35)
+        self.product_combo_cam2.setToolTip("เลือก Product สำหรับ Camera 2")
+        self.product_combo_cam2.addItem("-- No Product --", None)
+        self.product_combo_cam2.currentIndexChanged.connect(
+            lambda idx: self.on_product_changed(idx, camera_id=1))
+        cam2_product_row.addWidget(self.product_combo_cam2, 1)
+        insp_layout.addLayout(cam2_product_row)
+
+        self.expected_label_cam2 = QLabel("Expected (Cam2): -")
+        self.expected_label_cam2.setStyleSheet("color: #495057; font-size: 11px;")
+        insp_layout.addWidget(self.expected_label_cam2)
+
+        # Backward compat alias
+        self.product_combo = self.product_combo_cam1
+
+        # Refresh button
+        self.refresh_products_btn = QPushButton("Refresh Products")
+        self.refresh_products_btn.setMaximumWidth(120)
         self.refresh_products_btn.clicked.connect(self.load_product_list)
-        product_row.addWidget(self.refresh_products_btn)
-        insp_layout.addLayout(product_row)
+        insp_layout.addWidget(self.refresh_products_btn)
 
-        self.expected_label = QLabel("Expected: -")
-        self.expected_label.setStyleSheet("color: #495057; font-size: 11px;")
-        insp_layout.addWidget(self.expected_label)
+        self.load_product_list()
 
         # TRIGGER button (Capture mode)
         self.trigger_btn = QPushButton("TRIGGER")
@@ -614,21 +645,24 @@ class InspectionGUI(QMainWindow):
         }
 
     def load_product_list(self):
-        current_data = self.product_combo.currentData()
-        self.product_combo.clear()
-        self.product_combo.addItem("-- No Product --", None)
-
         products = self.component_manager.list_products()
-        for p in products:
-            self.product_combo.addItem(
-                f"{p['name']} ({p['component_count']} parts)", p['id'])
 
-        # Restore selection
-        if current_data:
-            for i in range(self.product_combo.count()):
-                if self.product_combo.itemData(i) == current_data:
-                    self.product_combo.setCurrentIndex(i)
-                    break
+        for combo_attr in ('product_combo_cam1', 'product_combo_cam2'):
+            combo = getattr(self, combo_attr, None)
+            if combo is None:
+                continue
+            current_data = combo.currentData()
+            combo.clear()
+            combo.addItem("-- No Product --", None)
+            for p in products:
+                combo.addItem(
+                    f"{p['name']} ({p['component_count']} parts)", p['id'])
+            # Restore selection
+            if current_data:
+                for i in range(combo.count()):
+                    if combo.itemData(i) == current_data:
+                        combo.setCurrentIndex(i)
+                        break
 
     # ═══════════════════════════════════════════
     #  ANOMALY TRAINING TAB
@@ -1425,17 +1459,19 @@ class InspectionGUI(QMainWindow):
         """ตรวจสอบว่าเลือกโหมด Multi camera หรือไม่"""
         return self.camera_mode_combo.currentData() == "multi"
 
-    def on_product_changed(self, index):
-        product_id = self.product_combo.currentData()
+    def on_product_changed(self, index, camera_id=0):
+        combo = self.product_combo_cam1 if camera_id == 0 else self.product_combo_cam2
+        label = self.expected_label_cam1 if camera_id == 0 else self.expected_label_cam2
+        cam_label = "Cam1" if camera_id == 0 else "Cam2"
+
+        product_id = combo.currentData()
         if product_id:
-            self.inspection_controller.set_product(product_id)
-            expected = self.inspection_controller.get_expected_class_names()
-            self.expected_label.setText(f"Expected: {', '.join(expected)}")
+            self.inspection_controller.set_product(product_id, camera_id=camera_id)
+            expected = self.inspection_controller.get_expected_class_names(camera_id=camera_id)
+            label.setText(f"Expected ({cam_label}): {', '.join(expected)}")
         else:
-            self.inspection_controller.current_product_id = None
-            self.inspection_controller.expected_parts = []
-            self.inspection_controller.expected_class_names = set()
-            self.expected_label.setText("Expected: -")
+            self.inspection_controller.clear_product(camera_id=camera_id)
+            label.setText(f"Expected ({cam_label}): -")
         self.save_ui_state()
 
     # ═══════════════════════════════════════════

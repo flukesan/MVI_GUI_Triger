@@ -99,6 +99,9 @@ class InspectionController(QObject):
         self.expected_parts: List[Dict] = []    # loaded from component DB
         self.expected_class_names: Set[str] = set()
 
+        # Per-camera product support (cam0, cam1)
+        self._camera_products: Dict[int, dict] = {}  # {camera_id: {"id", "name", "parts", "class_names"}}
+
         self.is_streaming: bool = False
         self.inspect_fps: int = 30              # ความถี่ในการ detect (Realtime mode)
         self.save_pass_images: bool = False
@@ -126,23 +129,66 @@ class InspectionController(QObject):
 
     # ─── Product / Expected Parts ───
 
-    def set_product(self, product_id: int):
-        """โหลด expected parts จาก component_definition DB"""
-        self.current_product_id = product_id
+    def set_product(self, product_id: int, camera_id: int = None):
+        """โหลด expected parts จาก component_definition DB
+
+        Args:
+            product_id: ID ของ product
+            camera_id: ถ้าระบุ จะ set เฉพาะกล้องนั้น (per-camera mode)
+                       ถ้าไม่ระบุ จะ set แบบ global (ทุกกล้องใช้ product เดียวกัน)
+        """
         product = self.components.get_product(product_id)
         if product:
-            self.current_product_name = product["name"]
-            self.expected_parts = self.components.get_product_components(product_id)
-            self.expected_class_names = {p["name"] for p in self.expected_parts}
-            print(f"Product set: {self.current_product_name} "
-                  f"({len(self.expected_parts)} expected parts: "
-                  f"{', '.join(self.expected_class_names)})")
+            name = product["name"]
+            parts = self.components.get_product_components(product_id)
+            class_names = {p["name"] for p in parts}
+            print(f"Product set: {name} "
+                  f"({len(parts)} expected parts: "
+                  f"{', '.join(class_names)})"
+                  f"{f' [camera {camera_id}]' if camera_id is not None else ''}")
         else:
+            name = ""
+            parts = []
+            class_names = set()
+
+        if camera_id is not None:
+            # Per-camera mode
+            self._camera_products[camera_id] = {
+                "id": product_id, "name": name,
+                "parts": parts, "class_names": class_names
+            }
+        else:
+            # Global mode (backward compat)
+            self._camera_products.clear()
+
+        # Always update global state (used as default/fallback)
+        self.current_product_id = product_id
+        self.current_product_name = name
+        self.expected_parts = parts
+        self.expected_class_names = class_names
+
+    def clear_product(self, camera_id: int = None):
+        """ล้าง product selection"""
+        if camera_id is not None:
+            self._camera_products.pop(camera_id, None)
+        else:
+            self._camera_products.clear()
+            self.current_product_id = None
             self.current_product_name = ""
             self.expected_parts = []
             self.expected_class_names = set()
 
-    def get_expected_class_names(self) -> Set[str]:
+    def _get_product_for_camera(self, camera_id: int) -> tuple:
+        """คืน (product_name, expected_parts, expected_class_names) สำหรับกล้องที่ระบุ"""
+        if camera_id in self._camera_products:
+            cp = self._camera_products[camera_id]
+            return cp["name"], cp["parts"], cp["class_names"]
+        # Fallback to global
+        return self.current_product_name, self.expected_parts, self.expected_class_names
+
+    def get_expected_class_names(self, camera_id: int = None) -> Set[str]:
+        if camera_id is not None and camera_id in self._camera_products:
+            return self._camera_products[camera_id]["class_names"].copy()
         return self.expected_class_names.copy()
 
     # ─── Mode Control ───
@@ -399,7 +445,9 @@ class InspectionController(QObject):
     def _compare_with_expected(self, detection_result: dict,
                                 camera_id: int,
                                 frame: np.ndarray) -> dict:
-        """เปรียบเทียบ detection กับ expected parts"""
+        """เปรียบเทียบ detection กับ expected parts (per-camera aware)"""
+        product_name, expected_parts, _ = self._get_product_for_camera(camera_id)
+
         detected_classes = {}
         for det in detection_result["detections"]:
             name = det["class_name"]
@@ -410,9 +458,9 @@ class InspectionController(QObject):
         missing_parts = []
         missing_parts_detail = []
 
-        if self.expected_parts:
+        if expected_parts:
             # มี expected parts — เปรียบเทียบ
-            for expected in self.expected_parts:
+            for expected in expected_parts:
                 exp_name = expected["name"]
                 matched = self._find_best_match(expected, detection_result["detections"])
 
@@ -434,7 +482,7 @@ class InspectionController(QObject):
                         "is_critical": expected.get("critical", True)
                     })
 
-            total_expected = len(self.expected_parts)
+            total_expected = len(expected_parts)
             found_count = len(found_parts)
 
             # Check critical components
@@ -468,7 +516,7 @@ class InspectionController(QObject):
             "reason": reason,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "camera_id": camera_id,
-            "product_name": self.current_product_name,
+            "product_name": product_name,
             "mode": self.current_mode,
             "found_parts": found_parts,
             "missing_parts": missing_parts,
